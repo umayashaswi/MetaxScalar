@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Customer Support Environment</title>
+    <style>
+        body { font-family: Arial; margin: 40px; }
+        .task { margin: 20px 0; padding: 20px; border: 1px solid #ccc; }
+        button { margin: 5px; padding: 10px; }
+        pre { background: #f0f0f0; padding: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Customer Support Environment</h1>
+    <div id="tasks"></div>
+    
+    <script>
+        async function loadTasks() {
+            const response = await fetch('/tasks');
+            const data = await response.json();
+            const tasksDiv = document.getElementById('tasks');
+            tasksDiv.innerHTML = data.tasks.map(task => `
+                <div class="task">
+                    <h3>${task.name} (${task.difficulty})</h3>
+                    <p>${task.description}</p>
+                    <button onclick="resetTask('${task.task_id}')">Start ${task.name}</button>
+                </div>
+            `).join('');
+        }
+        
+        async function resetTask(taskId) {
+            const response = await fetch(`/reset/${taskId}`);
+            const data = await response.json();
+            alert(`Session created: ${data.session_id}`);
+            console.log(data);
+        }
+        
+        loadTasks();
+    </script>
+</body>
+</html>

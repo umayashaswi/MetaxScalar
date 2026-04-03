@@ -1,0 +1,14 @@
+# Hugging Face Space configuration
+title: Customer Support Environment
+emoji: 🎯
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+license: mit
+
+# Environment variables (set as secrets in HF Space settings)
+# - GROQ_API_KEY
+# - API_BASE_URL  
+# - MODEL_NAME

@@ -1,0 +1,42 @@
+name: customer-support-env
+version: 1.0.0
+description: Customer support environment with order status, refund policy, and address change tasks
+author: Your Name
+tags:
+  - customer-support
+  - conversational-ai
+  - multi-task
+
+tasks:
+  - id: order_status_easy
+    name: Order Status Query
+    description: Agent must lookup order status using lookup_order action
+    difficulty: easy
+    max_steps: 3
+    
+  - id: refund_policy_medium
+    name: Refund Policy Explanation
+    description: Agent must explain refund policy in a reply
+    difficulty: medium
+    max_steps: 3
+    
+  - id: address_change_hard
+    name: Address Change Request
+    description: Agent must lookup order, ask for new address, and request confirmation
+    difficulty: hard
+    max_steps: 5
+
+action_space:
+  - action_type: lookup_order
+    parameters:
+      - order_id: string
+  - action_type: send_reply
+    parameters:
+      - message: string
+
+observation_space:
+  - task_id: string
+  - history: list
+  - done: boolean
+
+reward_range: [0.0, 1.0]
