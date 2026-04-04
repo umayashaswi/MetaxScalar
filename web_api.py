@@ -175,3 +175,14 @@ def tasks():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+@app.get("/")
+def home():
+    return {
+        "message": "Customer Support OpenEnv is running 🚀",
+        "available_endpoints": [
+            "/tasks",
+            "/reset/{task_id}",
+            "/step_ai",
+            "/docs"
+        ]
+    }
