@@ -58,17 +58,15 @@ else:
 # =========================
 
 def get_task_prompt(task_id: str, step_num: int = 1, history: List = None) -> str:
-    """Get the system prompt for a specific task and step"""
-    
     if task_id == "order_status_easy":
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
             "You MUST respond with EXACTLY this:\n"
             '{"action_type": "lookup_order", "order_id": "12345"}\n\n'
-            "DO NOT send any reply messages. DO NOT ask questions.\n"
             "DO NOT use 'order_status_easy' as action_type.\n"
-            "Just lookup the order with order_id 12345 and stop."
+            "Just lookup the order with order_id 12345."
         )
+    # ... rest of the prompts
     
     elif task_id == "refund_policy_medium":
         return (
@@ -313,143 +311,147 @@ async def serve_ui():
         }
         
         async function resetTask(taskId) {
-            try {
-                const response = await fetch(`${API_BASE}/reset/${taskId}`);
-                const data = await response.json();
-                currentSessions[taskId] = data.session_id;
-                taskSteps[taskId] = 0;
-                
-                const responseDiv = document.getElementById(`response-${taskId}`);
-                responseDiv.innerHTML = `<div style="color: green;">✅ Session created</div>`;
-                
-                const stepBtn = document.getElementById(`step-${taskId}`);
-                stepBtn.disabled = false;
-                stepBtn.textContent = '🤖 Run AI Agent';
-                
-                const autoBtn = document.getElementById(`auto-${taskId}`);
-                if (autoBtn) autoBtn.disabled = false;
-            } catch (error) {
-                alert('Error resetting task: ' + error.message);
-            }
+    try {
+        const response = await fetch(`${API_BASE}/reset/${taskId}`);
+        const data = await response.json();
+        currentSessions[taskId] = data.session_id;
+        taskSteps[taskId] = 0;
+        
+        const responseDiv = document.getElementById(`response-${taskId}`);
+        responseDiv.innerHTML = `<div style="color: green;">✅ Session created. Click "Run AI Agent" to start.</div>`;
+        
+        // Enable the step button, disable completed/done indicators
+        const stepBtn = document.getElementById(`step-${taskId}`);
+        stepBtn.disabled = false;
+        stepBtn.textContent = '🤖 Run AI Agent';
+        stepBtn.style.display = 'inline-block';
+        
+        // Hide completed indicator if exists
+        const completedSpan = document.getElementById(`completed-${taskId}`);
+        if (completedSpan) completedSpan.style.display = 'none';
+        
+        const autoBtn = document.getElementById(`auto-${taskId}`);
+        if (autoBtn) {
+            autoBtn.disabled = false;
+            autoBtn.textContent = '⚡ Run Complete';
         }
         
-        async function takeStep(taskId) {
-            if (!currentSessions[taskId]) {
-                alert('Please reset the task first!');
-                return;
-            }
-            
-            const stepBtn = document.getElementById(`step-${taskId}`);
+        // Clear any "Completed" text
+        const stepBtnText = stepBtn.innerHTML;
+        if (stepBtnText.includes('Completed')) {
+            stepBtn.disabled = false;
+            stepBtn.textContent = '🤖 Run AI Agent';
+        }
+    } catch (error) {
+        alert('Error resetting task: ' + error.message);
+    }
+}
+
+async function takeStep(taskId) {
+    if (!currentSessions[taskId]) {
+        alert('Please reset the task first!');
+        return;
+    }
+    
+    const stepBtn = document.getElementById(`step-${taskId}`);
+    stepBtn.disabled = true;
+    stepBtn.textContent = '⏳ AI Thinking...';
+    
+    try {
+        const response = await fetch(`${API_BASE}/step_ai`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_id: taskId, action: {} })
+        });
+        
+        const data = await response.json();
+        taskSteps[taskId] = data.step;
+        
+        const responseDiv = document.getElementById(`response-${taskId}`);
+        const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
+        const stepHtml = `
+            <div style="margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 5px; border-left: 3px solid #667eea;">
+                <strong>Step ${data.step}:</strong><br>
+                Action: <code>${JSON.stringify(data.action_used)}</code><br>
+                Reward: <span class="${rewardClass}">${data.reward}</span><br>
+                Score: <strong>${(data.score * 100).toFixed(1)}%</strong><br>
+                ${data.done ? '<span class="completed">🎉 TASK COMPLETED!</span>' : '➡️ Continue...'}
+            </div>
+        `;
+        responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
+        
+        if (data.done) {
             stepBtn.disabled = true;
-            stepBtn.textContent = '⏳ AI Thinking...';
-            
-            try {
-                const response = await fetch(`${API_BASE}/step_ai`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ task_id: taskId, action: {} })
-                });
-                
-                const data = await response.json();
-                taskSteps[taskId] = data.step;
-                
-                const responseDiv = document.getElementById(`response-${taskId}`);
-                const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
-                const stepHtml = `
-                    <div style="margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 5px; border-left: 3px solid #667eea;">
-                        <strong>Step ${data.step}:</strong><br>
-                        Action: <code>${JSON.stringify(data.action_used)}</code><br>
-                        Reward: <span class="${rewardClass}">${data.reward}</span><br>
-                        Score: <strong>${(data.score * 100).toFixed(1)}%</strong><br>
-                        ${data.done ? '<span class="completed">🎉 TASK COMPLETED!</span>' : '➡️ Continue...'}
-                    </div>
-                `;
-                responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
-                
-                if (data.done) {
-                    stepBtn.disabled = true;
-                    stepBtn.textContent = '✅ Completed';
-                    const autoBtn = document.getElementById(`auto-${taskId}`);
-                    if (autoBtn) autoBtn.disabled = true;
-                } else {
-                    stepBtn.disabled = false;
-                    stepBtn.textContent = '🤖 Take Next Step';
-                }
-            } catch (error) {
-                alert('Error: ' + error.message);
-                stepBtn.disabled = false;
-                stepBtn.textContent = '🤖 Retry Step';
-            }
-        }
-        
-        async function runFullTask(taskId) {
-            if (!currentSessions[taskId]) {
-                await resetTask(taskId);
-                await new Promise(r => setTimeout(r, 500));
-            }
-            
+            stepBtn.textContent = '✅ Completed';
             const autoBtn = document.getElementById(`auto-${taskId}`);
-            autoBtn.disabled = true;
-            autoBtn.textContent = '🏃 Running...';
-            
-            let done = false;
-            let maxSteps = taskId === 'address_change_hard' ? 5 : 3;
-            
-            for (let i = 0; i < maxSteps && !done; i++) {
-                await new Promise(r => setTimeout(r, 300));
-                
-                const response = await fetch(`${API_BASE}/step_ai`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ task_id: taskId, action: {} })
-                });
-                
-                const data = await response.json();
-                taskSteps[taskId] = data.step;
-                done = data.done;
-                
-                const responseDiv = document.getElementById(`response-${taskId}`);
-                const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
-                const stepHtml = `
-                    <div style="margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 5px; border-left: 3px solid #667eea;">
-                        <strong>Step ${data.step}:</strong><br>
-                        Action: <code>${JSON.stringify(data.action_used)}</code><br>
-                        Reward: <span class="${rewardClass}">${data.reward}</span><br>
-                        Score: <strong>${(data.score * 100).toFixed(1)}%</strong><br>
-                        ${data.done ? '<span class="completed">🎉 COMPLETED!</span>' : ''}
-                    </div>
-                `;
-                responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
-            }
-            
-            autoBtn.disabled = true;
-            autoBtn.textContent = '✅ Done';
-            const stepBtn = document.getElementById(`step-${taskId}`);
-            stepBtn.disabled = true;
+            if (autoBtn) autoBtn.disabled = true;
+        } else {
+            stepBtn.disabled = false;
+            stepBtn.textContent = '🤖 Take Next Step';
         }
+    } catch (error) {
+        alert('Error: ' + error.message);
+        stepBtn.disabled = false;
+        stepBtn.textContent = '🤖 Retry Step';
+    }
+}
+
+async function runFullTask(taskId) {
+    if (!currentSessions[taskId]) {
+        await resetTask(taskId);
+        await new Promise(r => setTimeout(r, 500));
+    }
+    
+    const stepBtn = document.getElementById(`step-${taskId}`);
+    const autoBtn = document.getElementById(`auto-${taskId}`);
+    autoBtn.disabled = true;
+    autoBtn.textContent = '🏃 Running...';
+    stepBtn.disabled = true;
+    
+    let done = false;
+    let maxSteps = taskId === 'address_change_hard' ? 5 : 3;
+    let stepsTaken = 0;
+    
+    while (!done && stepsTaken < maxSteps) {
+        await new Promise(r => setTimeout(r, 500));
         
-        async function loadTasks() {
-            try {
-                const response = await fetch(`${API_BASE}/tasks`);
-                const data = await response.json();
-                
-                const tasksGrid = document.getElementById('tasks');
-                tasksGrid.innerHTML = data.tasks.map(task => `
-                    <div class="task-card">
-                        <h3>${task.name}</h3>
-                        <span class="difficulty ${task.difficulty}">${task.difficulty.toUpperCase()}</span>
-                        <p>${task.description}</p>
-                        <p><strong>Max steps:</strong> ${task.max_steps}</p>
-                        <button onclick="resetTask('${task.task_id}')">🔄 Reset</button>
-                        <button id="step-${task.task_id}" onclick="takeStep('${task.task_id}')" disabled>🤖 Run AI Agent</button>
-                        <button id="auto-${task.task_id}" onclick="runFullTask('${task.task_id}')" disabled>⚡ Run Complete</button>
-                        <div id="response-${task.task_id}" class="response-area"></div>
-                    </div>
-                `).join('');
-            } catch (error) {
-                console.error('Error loading tasks:', error);
-            }
+        const response = await fetch(`${API_BASE}/step_ai`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_id: taskId, action: {} })
+        });
+        
+        const data = await response.json();
+        stepsTaken = data.step;
+        done = data.done;
+        
+        const responseDiv = document.getElementById(`response-${taskId}`);
+        const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
+        const stepHtml = `
+            <div style="margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 5px; border-left: 3px solid #667eea;">
+                <strong>Step ${data.step}:</strong><br>
+                Action: <code>${JSON.stringify(data.action_used)}</code><br>
+                Reward: <span class="${rewardClass}">${data.reward}</span><br>
+                Score: <strong>${(data.score * 100).toFixed(1)}%</strong><br>
+                ${data.done ? '<span class="completed">🎉 COMPLETED!</span>' : ''}
+            </div>
+        `;
+        responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
+        
+        if (data.done) {
+            stepBtn.disabled = true;
+            stepBtn.textContent = '✅ Completed';
+            break;
         }
+    }
+    
+    autoBtn.disabled = true;
+    autoBtn.textContent = '✅ Done';
+    if (!done) {
+        stepBtn.disabled = false;
+        stepBtn.textContent = '🤖 Continue';
+    }
+}
         
         checkHealth();
         loadTasks();
