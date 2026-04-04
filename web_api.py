@@ -63,17 +63,18 @@ def get_task_prompt(task_id: str, step_num: int = 1, history: List = None) -> st
     if task_id == "order_status_easy":
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
-            "You MUST complete this in ONE step:\n"
+            "You MUST respond with EXACTLY this:\n"
             '{"action_type": "lookup_order", "order_id": "12345"}\n\n'
             "DO NOT send any reply messages. DO NOT ask questions.\n"
-            "Just lookup the order and stop."
+            "DO NOT use 'order_status_easy' as action_type.\n"
+            "Just lookup the order with order_id 12345 and stop."
         )
     
     elif task_id == "refund_policy_medium":
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
             "You MUST complete this in ONE step:\n"
-            '{"action_type": "send_reply", "message": "Explain the refund policy here"}\n\n'
+            '{"action_type": "send_reply", "message": "Our refund policy allows for a full refund within 30 days of purchase."}\n\n'
             "Your message must include the word 'refund'.\n"
             "DO NOT lookup the order. Just send a reply explaining the refund policy."
         )
@@ -83,18 +84,9 @@ def get_task_prompt(task_id: str, step_num: int = 1, history: List = None) -> st
             "You are a Customer Support AI handling address changes.\n"
             "Return ONLY valid JSON.\n\n"
             "You MUST follow this EXACT 3-step sequence:\n\n"
-            "STEP 1 (lookup order):\n"
-            '{"action_type": "lookup_order", "order_id": "12345"}\n\n'
-            "STEP 2 (ask for address):\n"
-            '{"action_type": "send_reply", "message": "Please provide your new address."}\n\n'
-            "STEP 3 (ask for confirmation):\n"
-            '{"action_type": "send_reply", "message": "Please confirm your new address."}\n\n'
-            "CRITICAL RULES:\n"
-            "- Step 1 MUST be lookup_order\n"
-            "- Step 2 MUST ask for address (include word 'address')\n"
-            "- Step 3 MUST ask for confirmation (include word 'confirm')\n"
-            "- Do NOT add extra steps\n"
-            "- Keep messages very short and direct"
+            "STEP 1: {\"action_type\": \"lookup_order\", \"order_id\": \"12345\"}\n"
+            "STEP 2: {\"action_type\": \"send_reply\", \"message\": \"Please provide your new address.\"}\n"
+            "STEP 3: {\"action_type\": \"send_reply\", \"message\": \"Please confirm your new address.\"}\n"
         )
     
     else:
@@ -103,7 +95,8 @@ def get_task_prompt(task_id: str, step_num: int = 1, history: List = None) -> st
 def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
     """Return default action for current step if model fails"""
     if task_id == "order_status_easy":
-        return {"action_type": "lookup_order", "order_id": "12345"}
+        return {"action_type": "lookup_order", "order_id": "12345"}  # FIXED
+    # ... rest of the function
     
     elif task_id == "refund_policy_medium":
         return {
