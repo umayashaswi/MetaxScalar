@@ -27,6 +27,9 @@ API_BASE = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
 
 client = OpenAI(api_key=API_KEY, base_url=API_BASE) if API_KEY else None
 
+print(f"🤖 AI Model: {MODEL_NAME}")
+print(f"🔑 API Key configured: {bool(API_KEY)}")
+
 # =========================
 # APP
 # =========================
@@ -50,12 +53,10 @@ class ResetRequest(BaseModel):
     task_id: str
 
 # =========================
-# TASK-SPECIFIC PROMPTS (for AI inference - SAME as inference.py)
+# TASK-SPECIFIC PROMPTS
 # =========================
 
 def get_task_prompt(task_id: str, step_num: int, history: List) -> str:
-    """Get the system prompt for the AI model - MATCHES inference.py"""
-    
     if task_id == "order_status_easy":
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
@@ -69,27 +70,26 @@ def get_task_prompt(task_id: str, step_num: int, history: List) -> str:
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
             "You MUST complete this in ONE step:\n"
-            '{"action_type": "send_reply", "message": "Explain the refund policy here"}\n\n'
+            '{"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}\n\n'
             "Your message must include the word 'refund'.\n"
-            "DO NOT lookup the order. Just send a reply explaining the refund policy."
+            "DO NOT lookup the order."
         )
     
     elif task_id == "address_change_hard":
         return (
             "You are a Customer Support AI handling address changes.\n"
             "Return ONLY valid JSON.\n\n"
-            "You MUST follow this EXACT 3-step sequence:\n\n"
+            "Follow this 3-step sequence:\n\n"
             "STEP 1: {\"action_type\": \"lookup_order\", \"order_id\": \"12345\"}\n"
             "STEP 2: {\"action_type\": \"send_reply\", \"message\": \"Please provide your new address.\"}\n"
             "STEP 3: {\"action_type\": \"send_reply\", \"message\": \"Please confirm your new address.\"}\n\n"
-            "CRITICAL: Keep messages short and direct."
+            "Keep messages short and direct."
         )
     
     else:
         return "Return valid JSON with action_type field."
 
 def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
-    """Fallback action if AI fails"""
     if task_id == "order_status_easy":
         return {"action_type": "lookup_order", "order_id": "12345"}
     
@@ -107,18 +107,19 @@ def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
         elif step_num == 3:
             return {"action_type": "send_reply", "message": "Please confirm your new address."}
     
-    return {"action_type": "send_reply", "message": "How can I help you?"}
+    return {"action_type": "send_reply", "message": "OK"}
 
 def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
-    """Call the AI model to get an action - REAL INFERENCE matching inference.py"""
+    """Call the AI model to get an action"""
     
-    # If no API key, use fallback
     if client is None:
+        print("⚠️ No API key, using fallback action")
         return get_step_default_action(task_id, step_num)
     
     sys_prompt = get_task_prompt(task_id, step_num, history)
     
     try:
+        print(f"🤖 Calling AI model for {task_id} step {step_num}...")
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -133,6 +134,7 @@ def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
         )
 
         content = response.choices[0].message.content.strip()
+        print(f"📝 AI response: {content[:200]}...")
         
         if "```" in content:
             parts = content.split("```")
@@ -157,67 +159,48 @@ def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
         return data
         
     except Exception as e:
-        print(f"AI model error: {e}")
+        print(f"❌ AI model error: {e}")
         return get_step_default_action(task_id, step_num)
 
 # =========================
-# ACTION VALIDATION & REWARD EXPLANATIONS
+# ACTION VALIDATION
 # =========================
 
-def validate_action_and_get_explanation(task_id: str, step: int, action_dict: Dict) -> tuple:
-    """Validate action and return (is_valid, reward, explanation, expected_action)"""
-    
+def validate_action(task_id: str, step: int, action_dict: Dict) -> tuple:
     action_type = action_dict.get("action_type", "")
     
-    # Order Status Easy Task
     if task_id == "order_status_easy":
         if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
-            return True, 1.0, "✓ Correct: Order lookup successful", "lookup_order"
+            return True, 1.0, "✅ Correct: Order lookup successful", "lookup_order"
         else:
-            return False, -0.3, f"✗ Wrong action! Got: {action_type}, Expected: lookup_order", "lookup_order"
+            return False, -0.3, f"❌ Wrong: Got '{action_type}', expected 'lookup_order'", "lookup_order"
     
-    # Refund Policy Medium Task
     if task_id == "refund_policy_medium":
         if action_type == "send_reply" and "refund" in action_dict.get("message", "").lower():
-            return True, 1.0, "✓ Correct: Refund policy explained", "send_reply with 'refund'"
+            return True, 1.0, "✅ Correct: Refund policy explained", "send_reply with 'refund'"
         else:
-            return False, -0.3, "✗ Invalid: Send reply explaining refund policy (must include 'refund')", "send_reply containing 'refund'"
+            return False, -0.3, "❌ Wrong: Must send reply with 'refund'", "send_reply with 'refund'"
     
-    # Address Change Hard Task
     if task_id == "address_change_hard":
         if step == 1:
             if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
-                return True, 0.6, "✓ Step 1/3: Order located successfully", "lookup_order with order_id 12345"
+                return True, 0.6, "✅ Step 1/3: Order located", "lookup_order"
             else:
-                return False, -0.3, f"✗ Step 1/3: Got {action_type}, Expected lookup_order", "lookup_order with order_id 12345"
+                return False, -0.3, f"❌ Step 1: Got '{action_type}', expected 'lookup_order'", "lookup_order"
         
         elif step == 2:
             if action_type == "send_reply" and "address" in action_dict.get("message", "").lower():
-                return True, 0.2, "✓ Step 2/3: Address request sent", "send_reply asking for address"
+                return True, 0.2, "✅ Step 2/3: Address requested", "send_reply asking for address"
             else:
-                return False, -0.3, "✗ Step 2/3: Ask customer to provide new address", "send_reply asking for new address"
+                return False, -0.3, "❌ Step 2: Must ask for new address", "send_reply asking for address"
         
         elif step == 3:
             if action_type == "send_reply" and "confirm" in action_dict.get("message", "").lower():
-                return True, 0.2, "✓ Step 3/3: Address confirmed - Complete!", "send_reply asking for confirmation"
+                return True, 0.2, "✅ Step 3/3: Address confirmed - Complete!", "send_reply asking for confirmation"
             else:
-                return False, -0.3, "✗ Step 3/3: Ask customer to confirm address", "send_reply asking to confirm address"
+                return False, -0.3, "❌ Step 3: Must ask for confirmation", "send_reply asking for confirmation"
     
-    return False, -0.3, "✗ Invalid action format", "valid JSON action"
-
-def get_step_display_name(task_id: str, step: int) -> str:
-    if task_id == "address_change_hard":
-        if step == 1:
-            return "🔍 Locate Order"
-        elif step == 2:
-            return "📝 Request New Address"
-        elif step == 3:
-            return "✅ Confirm Address Change"
-    elif task_id == "order_status_easy":
-        return "📊 Fetch Order Status"
-    elif task_id == "refund_policy_medium":
-        return "📋 Explain Refund Policy"
-    return "Execute Step"
+    return False, -0.3, "❌ Invalid action format", "valid JSON"
 
 # =========================
 # RESET
@@ -236,9 +219,7 @@ def reset(req: ResetRequest):
         "steps": 0,
         "rewards": [],
         "explanations": [],
-        "step_names": [],
-        "mistakes": [],
-        "ai_actions": [],
+        "actions_taken": [],
         "done": False,
         "total_reward": 0.0,
         "history": [],
@@ -248,7 +229,7 @@ def reset(req: ResetRequest):
     return {
         "session_id": session_id,
         "task_id": task_id,
-        "message": f"✅ Environment reset successfully",
+        "message": f"Environment reset successfully",
         "steps": 0,
         "done": False,
         "score": "0.0 / 1.0"
@@ -260,7 +241,7 @@ def reset_get(task_id: str):
     return reset(req)
 
 # =========================
-# STEP AI - WITH REAL INFERENCE
+# STEP AI - REAL INFERENCE
 # =========================
 
 @app.post("/step_ai")
@@ -271,16 +252,8 @@ def step_ai(req: StepRequest):
     session = sessions[req.session_id]
 
     if session["done"]:
-        final_message = ""
-        if session["task_id"] == "address_change_hard":
-            final_message = "🎉 Address change successfully completed!"
-        elif session["task_id"] == "order_status_easy":
-            final_message = "🎉 Order status retrieved successfully!"
-        elif session["task_id"] == "refund_policy_medium":
-            final_message = "🎉 Refund policy explained!"
-        
         return {
-            "message": f"✅ Task completed. {final_message} Reset to start new.",
+            "message": "Task already completed. Please reset.",
             "done": True,
             "score": f"{session['total_reward']:.1f} / 1.0",
             "step": session["steps"]
@@ -289,13 +262,9 @@ def step_ai(req: StepRequest):
     env = session["env"]
     step_num = session["steps"] + 1
     
-    # ============================================
-    # CRITICAL: Call AI model for REAL inference
-    # ============================================
+    # Call AI model for REAL inference
     ai_action = call_ai_model(session["task_id"], step_num, session["history"])
     
-    step_display_name = get_step_display_name(session["task_id"], step_num)
-
     try:
         action = Action(**ai_action)
     except Exception:
@@ -303,109 +272,79 @@ def step_ai(req: StepRequest):
         action = Action(**ai_action)
     
     # Validate AI's action
-    is_valid, reward_value, explanation, expected_action = validate_action_and_get_explanation(
+    is_valid, reward_value, explanation, expected = validate_action(
         session["task_id"], step_num, ai_action
     )
     
     # Take step in environment
     obs, env_reward, done, info = env.step(action)
     
-    final_reward = reward_value
-    is_mistake = not is_valid
-    
     session["steps"] += 1
-    session["rewards"].append(final_reward)
+    session["rewards"].append(reward_value)
     session["explanations"].append(explanation)
-    session["step_names"].append(step_display_name)
-    session["ai_actions"].append(ai_action)
-    
-    if is_mistake:
-        session["mistakes"].append({
-            "step": step_num,
-            "expected": expected_action,
-            "got": ai_action.get("action_type", "unknown"),
-            "full_action": ai_action
-        })
-    
-    session["total_reward"] += final_reward
+    session["actions_taken"].append(ai_action)
+    session["total_reward"] += reward_value
     session["done"] = done
     session["history"].append(ai_action)
 
     score_value = min(max(session["total_reward"], 0.0), 1.0)
-    score_display = f"{score_value:.1f} / 1.0"
+    
+    # Calculate max reward for this task
+    if session["task_id"] == "address_change_hard":
+        max_reward = 1.0
+    else:
+        max_reward = 1.0
     
     return {
         "step": session["steps"],
-        "step_name": step_display_name,
         "action": ai_action,
-        "reward": final_reward,
+        "reward": reward_value,
         "reward_explanation": explanation,
-        "is_mistake": is_mistake,
-        "expected_action": expected_action if is_mistake else None,
         "done": done,
-        "score": score_display,
+        "score": f"{score_value:.1f} / 1.0",
         "score_value": score_value,
         "total_reward": session["total_reward"],
-        "total_steps": session["steps"],
-        "mistakes_count": len(session["mistakes"]),
-        "message": "🎉 Task completed successfully!" if done else None
+        "is_valid": is_valid,
+        "expected_action": expected if not is_valid else None,
+        "message": "🎉 Task completed!" if done else None
     }
 
 
-# =========================
-# GET SESSION SUMMARY
-# =========================
-
-@app.get("/session/{session_id}/summary")
-def get_session_summary(session_id: str):
+@app.get("/session/{session_id}")
+def get_session(session_id: str):
     if session_id not in sessions:
         raise HTTPException(404, "Session not found")
     
     session = sessions[session_id]
-    expected_steps = 3 if session["task_id"] == "address_change_hard" else 1
-    efficiency = min(100, int((expected_steps / max(session["steps"], 1)) * 100)) if session["steps"] > 0 else 0
     score_value = min(max(session["total_reward"], 0.0), 1.0)
-    intelligence_score = round(score_value * 10 - (len(session["mistakes"]) * 0.5), 1)
-    intelligence_score = max(0, min(10, intelligence_score))
     
     return {
         "session_id": session_id,
         "task_id": session["task_id"],
-        "steps_taken": session["steps"],
-        "expected_steps": expected_steps,
-        "efficiency": efficiency,
-        "mistakes": len(session["mistakes"]),
-        "mistake_details": session["mistakes"],
+        "steps": session["steps"],
+        "rewards": session["rewards"],
+        "explanations": session["explanations"],
+        "actions_taken": session["actions_taken"],
         "total_reward": session["total_reward"],
         "score": f"{score_value:.1f} / 1.0",
-        "score_value": score_value,
-        "intelligence_score": f"{intelligence_score:.1f} / 10",
-        "completed": session["done"],
-        "steps_history": [
-            {"step": i+1, "name": session["step_names"][i], "reward": session["rewards"][i], "explanation": session["explanations"][i]}
-            for i in range(len(session["steps"]))
-        ]
+        "done": session["done"]
     }
 
 
 # =========================
-# TASK LIST
+# TASKS
 # =========================
 
 @app.get("/tasks")
 def tasks():
     return {
         "tasks": [
-            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Look up order status using lookup_order action", "difficulty": "easy", "max_steps": 3, "expected_reward": 1.0, "icon": "📊", "steps_detail": ["Step 1: Lookup order (+1.0)"]},
-            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Explain refund policy in a reply message", "difficulty": "medium", "max_steps": 3, "expected_reward": 1.0, "icon": "📋", "steps_detail": ["Step 1: Send reply with 'refund' (+1.0)"]},
-            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Handle address change request in 3 steps", "difficulty": "hard", "max_steps": 5, "expected_reward": 1.0, "icon": "📍", "steps_detail": ["Step 1: Lookup order (+0.6)", "Step 2: Ask for address (+0.2)", "Step 3: Confirm address (+0.2)"]}
+            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Look up order status using lookup_order action", "difficulty": "easy", "max_steps": 3, "expected_reward": 1.0},
+            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Explain refund policy in a reply message", "difficulty": "medium", "max_steps": 3, "expected_reward": 1.0},
+            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Handle address change request in 3 steps", "difficulty": "hard", "max_steps": 5, "expected_reward": 1.0}
         ]
     }
 
-
-# =========================
-# HEALTH
-# =========================
 
 @app.get("/health")
 def health():
@@ -413,7 +352,7 @@ def health():
 
 
 # =========================
-# HOME UI - SAME BEAUTIFUL UI
+# UI
 # =========================
 
 @app.get("/", response_class=HTMLResponse)
@@ -424,223 +363,156 @@ def home():
 <head>
     <title>Customer Support Environment</title>
     <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
             min-height: 100vh;
+            padding: 20px;
         }
-        .header {
-            text-align: center;
-            color: white;
-            margin-bottom: 40px;
-        }
-        .header h1 { font-size: 3em; margin-bottom: 10px; }
-        .header p { font-size: 1.2em; opacity: 0.9; }
-        .tasks-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-            gap: 25px;
-        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header { text-align: center; color: white; margin-bottom: 30px; }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; }
+        .header p { opacity: 0.8; }
+        .tasks-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; }
         .task-card {
-            background: white;
-            border-radius: 15px;
-            padding: 25px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-            transition: transform 0.3s ease;
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 20px;
+            border: 1px solid rgba(255,255,255,0.2);
         }
-        .task-card:hover { transform: translateY(-5px); }
-        .task-card h3 { color: #667eea; margin-top: 0; font-size: 1.5em; }
+        .task-card h3 { color: white; margin-bottom: 10px; }
         .difficulty {
             display: inline-block;
-            padding: 5px 12px;
+            padding: 4px 12px;
             border-radius: 20px;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: bold;
-            margin-bottom: 15px;
+            margin-bottom: 10px;
         }
-        .easy { background: #10b981; color: white; }
-        .medium { background: #f59e0b; color: white; }
-        .hard { background: #ef4444; color: white; }
-        .reward-badge {
-            display: inline-block;
-            background: #e8eaf6;
-            padding: 5px 10px;
-            border-radius: 10px;
-            font-size: 12px;
-            margin: 5px 0;
-        }
+        .easy { background: #10b981; }
+        .medium { background: #f59e0b; }
+        .hard { background: #ef4444; }
+        .task-desc { color: rgba(255,255,255,0.7); font-size: 13px; margin-bottom: 15px; }
         button {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             border: none;
-            padding: 10px 20px;
+            padding: 8px 16px;
             border-radius: 8px;
             cursor: pointer;
             margin: 5px 5px 5px 0;
-            font-size: 14px;
-            transition: opacity 0.3s ease;
+            font-size: 13px;
         }
-        button:hover { opacity: 0.9; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        button:hover { opacity: 0.9; transform: scale(1.02); }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .reset-btn { background: linear-gradient(135deg, #f59e0b, #d97706); }
+        .auto-btn { background: linear-gradient(135deg, #10b981, #059669); }
         .response-area {
-            background: #f8f9fa;
-            border-radius: 10px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
             padding: 15px;
             margin-top: 15px;
-            font-family: 'Courier New', monospace;
-            font-size: 13px;
             max-height: 400px;
             overflow-y: auto;
         }
         .step-entry {
-            margin-top: 10px;
-            padding: 12px;
-            background: white;
+            background: rgba(255,255,255,0.1);
             border-radius: 8px;
-            border-left: 4px solid #667eea;
-        }
-        .status {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: white;
-            padding: 10px 20px;
-            border-radius: 20px;
-            font-size: 14px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 10px;
+            margin-bottom: 10px;
+            border-left: 3px solid #667eea;
         }
         .reward-positive { color: #10b981; font-weight: bold; }
         .reward-negative { color: #ef4444; font-weight: bold; }
-        .completed { color: #10b981; font-weight: bold; font-size: 16px; }
-        .score-large { font-size: 20px; font-weight: bold; color: #667eea; }
-        .explanation { color: #6b7280; font-size: 12px; margin-top: 5px; }
-        .perf-summary { background: #e8eaf6; border-radius: 10px; padding: 12px; margin-bottom: 15px; }
-        .perf-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; text-align: center; }
-        .perf-value { font-size: 1.2em; font-weight: bold; color: #667eea; }
-        .perf-label { font-size: 0.7em; color: #666; }
-        .progress-bar { background: #ddd; border-radius: 10px; height: 6px; margin: 10px 0; overflow: hidden; }
-        .progress-fill { background: linear-gradient(90deg, #10b981, #667eea); height: 100%; width: 0%; transition: width 0.3s ease; }
-        .intel-score { text-align: center; margin-top: 10px; padding: 8px; background: linear-gradient(135deg, #667eea20, #764ba220); border-radius: 8px; }
-        .intel-value { font-size: 1.3em; font-weight: bold; color: #667eea; }
+        .score-display { font-size: 18px; font-weight: bold; color: #667eea; }
+        .status {
+            position: fixed;
+            bottom: 15px;
+            right: 15px;
+            background: rgba(0,0,0,0.7);
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            color: #10b981;
+        }
+        .empty-state { text-align: center; color: rgba(255,255,255,0.4); padding: 20px; }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>🎯 Customer Support Environment</h1>
-        <p>Real AI Inference (LLaMA 3.1) | Explainable Rewards | Performance Analytics</p>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 Customer Support Environment</h1>
+            <p>Real AI Inference (LLaMA 3.1) | Live Actions | Instant Rewards</p>
+        </div>
+        <div class="tasks-grid" id="tasks"></div>
+        <div class="status" id="status">🟢 System Online</div>
     </div>
-    
-    <div class="tasks-grid" id="tasks"></div>
-    
-    <div class="status" id="status">🟢 Healthy</div>
-    
+
     <script>
         const API_BASE = window.location.origin;
         let currentSessions = {};
-        let sessionSummaries = {};
-        
+
         async function checkHealth() {
             try {
-                const response = await fetch(`${API_BASE}/health`);
-                const data = await response.json();
-                document.getElementById('status').innerHTML = `🟢 Healthy | ${data.active_sessions} active | 🤖 ${data.ai_model || 'LLaMA'}`;
-            } catch (error) {
-                document.getElementById('status').innerHTML = '🔴 Error';
-            }
+                const res = await fetch(`${API_BASE}/health`);
+                const data = await res.json();
+                document.getElementById('status').innerHTML = `🟢 Online | ${data.active_sessions} sessions | 🤖 ${data.ai_model || 'LLaMA'}`;
+            } catch(e) { document.getElementById('status').innerHTML = '🔴 Offline'; }
         }
-        
-        async function fetchSummary(sessionId, taskId) {
-            try {
-                const response = await fetch(`${API_BASE}/session/${sessionId}/summary`);
-                const data = await response.json();
-                sessionSummaries[taskId] = data;
-                return data;
-            } catch (error) {
-                return null;
-            }
-        }
-        
-        function renderPerfSummary(summary) {
-            if (!summary || summary.steps_taken === 0) return '';
-            const progress = summary.score_value * 100;
-            return `
-                <div class="perf-summary">
-                    <div class="perf-grid">
-                        <div><div class="perf-value">${summary.steps_taken}/${summary.expected_steps}</div><div class="perf-label">STEPS</div></div>
-                        <div><div class="perf-value">${summary.efficiency}%</div><div class="perf-label">EFFICIENCY</div></div>
-                        <div><div class="perf-value">${summary.mistakes}</div><div class="perf-label">MISTAKES</div></div>
-                        <div><div class="perf-value">${summary.score}</div><div class="perf-label">SCORE</div></div>
-                    </div>
-                    <div class="progress-bar"><div class="progress-fill" style="width: ${progress}%"></div></div>
-                    <div class="intel-score"><div class="perf-label">🤖 AGENT INTELLIGENCE SCORE</div><div class="intel-value">${summary.intelligence_score}</div></div>
-                </div>
-            `;
-        }
-        
-        function renderSteps(steps) {
-            if (!steps || steps.length === 0) return '<div style="text-align: center; color: #999; padding: 20px;">🤖 Click "Take Step" to start AI inference</div>';
-            return steps.map(s => `
-                <div class="step-entry">
-                    <strong>Step ${s.step}: ${s.name}</strong><br>
-                    <strong>Reward:</strong> <span class="${s.reward >= 0 ? 'reward-positive' : 'reward-negative'}">${s.reward >= 0 ? '+' : ''}${s.reward}</span><br>
-                    <div class="explanation">📖 ${s.explanation}</div>
-                </div>
-            `).reverse().join('');
-        }
-        
+
         async function resetTask(taskId) {
             try {
-                const response = await fetch(`${API_BASE}/reset/${taskId}`);
-                const data = await response.json();
+                const res = await fetch(`${API_BASE}/reset/${taskId}`);
+                const data = await res.json();
                 currentSessions[taskId] = data.session_id;
-                delete sessionSummaries[taskId];
                 
                 const responseDiv = document.getElementById(`response-${taskId}`);
-                responseDiv.innerHTML = `<div class="step-entry" style="background: #e8f5e9; border-left-color: #4caf50;">
-                    ✅ ${data.message}<br>
-                    <strong>Score:</strong> ${data.score}
-                </div>`;
+                responseDiv.innerHTML = `<div class="empty-state">✅ Environment reset. Ready for AI inference.</div>`;
                 
                 const stepBtn = document.getElementById(`step-${taskId}`);
                 stepBtn.disabled = false;
                 stepBtn.textContent = '🤖 Take Step';
+                stepBtn.style.opacity = '1';
                 
                 const autoBtn = document.getElementById(`auto-${taskId}`);
-                if (autoBtn) autoBtn.disabled = false;
-                autoBtn.textContent = '⚡ Run Full Task';
-            } catch (error) {
-                alert('Error resetting task: ' + error.message);
-            }
+                if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = '⚡ Run Full Episode'; }
+            } catch(e) { alert('Reset error: ' + e.message); }
         }
-        
+
         async function takeStep(taskId) {
-            if (!currentSessions[taskId]) {
-                alert('Please reset the task first!');
-                return;
-            }
+            if (!currentSessions[taskId]) { alert('Please reset first!'); return; }
             
             const stepBtn = document.getElementById(`step-${taskId}`);
             stepBtn.disabled = true;
             stepBtn.textContent = '⏳ AI Thinking...';
             
             try {
-                await fetch(`${API_BASE}/step_ai`, {
+                const res = await fetch(`${API_BASE}/step_ai`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ session_id: currentSessions[taskId] })
                 });
+                const data = await res.json();
                 
-                const summary = await fetchSummary(currentSessions[taskId], taskId);
                 const responseDiv = document.getElementById(`response-${taskId}`);
+                const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
                 
-                if (summary) {
-                    responseDiv.innerHTML = renderPerfSummary(summary) + renderSteps(summary.steps_history);
-                }
+                const stepHtml = `
+                    <div class="step-entry">
+                        <strong>Step ${data.step}</strong><br>
+                        <strong>Action:</strong> <code>${JSON.stringify(data.action)}</code><br>
+                        <strong>Reward:</strong> <span class="${rewardClass}">${data.reward >= 0 ? '+' : ''}${data.reward}</span><br>
+                        <div style="font-size: 11px; color: #aaa; margin-top: 5px;">📖 ${data.reward_explanation}</div>
+                        <strong>Score:</strong> <span class="score-display">${data.score}</span><br>
+                        ${data.message ? `<div style="margin-top: 8px; color: #10b981;">🎉 ${data.message}</div>` : ''}
+                    </div>
+                `;
                 
-                if (summary?.completed) {
+                responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
+                
+                if (data.done) {
                     stepBtn.disabled = true;
                     stepBtn.textContent = '✅ Completed';
                     const autoBtn = document.getElementById(`auto-${taskId}`);
@@ -649,83 +521,82 @@ def home():
                     stepBtn.disabled = false;
                     stepBtn.textContent = '🤖 Take Next Step';
                 }
-            } catch (error) {
-                alert('Error: ' + error.message);
+            } catch(e) {
+                alert('Step error: ' + e.message);
                 stepBtn.disabled = false;
                 stepBtn.textContent = '🤖 Retry';
             }
         }
-        
+
         async function runFullTask(taskId) {
-            if (!currentSessions[taskId]) {
-                await resetTask(taskId);
-                await new Promise(r => setTimeout(r, 500));
-            }
+            if (!currentSessions[taskId]) { await resetTask(taskId); await new Promise(r => setTimeout(r, 500)); }
             
             const stepBtn = document.getElementById(`step-${taskId}`);
             const autoBtn = document.getElementById(`auto-${taskId}`);
             autoBtn.disabled = true;
-            autoBtn.textContent = '🏃 AI Running...';
+            autoBtn.textContent = '🏃 Running...';
             stepBtn.disabled = true;
             
             let done = false;
-            let maxSteps = taskId === 'address_change_hard' ? 5 : 3;
-            let stepsTaken = 0;
+            let maxAttempts = 10;
+            let attempts = 0;
             
-            while (!done && stepsTaken < maxSteps) {
-                await new Promise(r => setTimeout(r, 400));
+            while (!done && attempts < maxAttempts) {
+                await new Promise(r => setTimeout(r, 600));
                 
-                await fetch(`${API_BASE}/step_ai`, {
+                const res = await fetch(`${API_BASE}/step_ai`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ session_id: currentSessions[taskId] })
                 });
+                const data = await res.json();
+                done = data.done;
+                attempts++;
                 
-                const summary = await fetchSummary(currentSessions[taskId], taskId);
                 const responseDiv = document.getElementById(`response-${taskId}`);
-                
-                if (summary) {
-                    responseDiv.innerHTML = renderPerfSummary(summary) + renderSteps(summary.steps_history);
-                    done = summary.completed;
-                }
-                stepsTaken++;
+                const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
+                const stepHtml = `
+                    <div class="step-entry">
+                        <strong>Step ${data.step}</strong><br>
+                        <strong>Action:</strong> <code>${JSON.stringify(data.action)}</code><br>
+                        <strong>Reward:</strong> <span class="${rewardClass}">${data.reward >= 0 ? '+' : ''}${data.reward}</span><br>
+                        <div style="font-size: 11px; color: #aaa; margin-top: 5px;">📖 ${data.reward_explanation}</div>
+                        <strong>Score:</strong> <span class="score-display">${data.score}</span><br>
+                        ${data.message ? `<div style="margin-top: 8px; color: #10b981;">🎉 ${data.message}</div>` : ''}
+                    </div>
+                `;
+                responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
             }
             
             autoBtn.disabled = true;
-            autoBtn.textContent = '✅ Done';
-            if (!done) {
-                stepBtn.disabled = false;
-                stepBtn.textContent = '🤖 Continue';
-            }
+            autoBtn.textContent = '✅ Complete';
+            if (!done) stepBtn.disabled = false;
         }
-        
+
         async function loadTasks() {
             try {
-                const response = await fetch(`${API_BASE}/tasks`);
-                const data = await response.json();
-                
-                const tasksGrid = document.getElementById('tasks');
-                tasksGrid.innerHTML = data.tasks.map(task => `
+                const res = await fetch(`${API_BASE}/tasks`);
+                const data = await res.json();
+                const grid = document.getElementById('tasks');
+                grid.innerHTML = data.tasks.map(t => `
                     <div class="task-card">
-                        <h3>${task.icon || '🎯'} ${task.name}</h3>
-                        <span class="difficulty ${task.difficulty}">${task.difficulty.toUpperCase()}</span>
-                        <p>${task.description}</p>
-                        <div class="reward-badge">🎯 Expected Reward: ${task.expected_reward} / 1.0</div>
-                        ${task.steps_detail ? task.steps_detail.map(step => `<div class="reward-badge">📋 ${step}</div>`).join('') : ''}
-                        <p><strong>Max steps:</strong> ${task.max_steps}</p>
-                        <button onclick="resetTask('${task.task_id}')">🔄 Reset</button>
-                        <button id="step-${task.task_id}" onclick="takeStep('${task.task_id}')" disabled>🤖 Take Step</button>
-                        <button id="auto-${task.task_id}" onclick="runFullTask('${task.task_id}')" disabled>⚡ Run Full Task</button>
-                        <div id="response-${task.task_id}" class="response-area">
-                            <div style="color: #999; text-align: center;">Click Reset to start</div>
+                        <h3>${t.name}</h3>
+                        <span class="difficulty ${t.difficulty}">${t.difficulty.toUpperCase()}</span>
+                        <div class="task-desc">${t.description}</div>
+                        <div style="font-size: 12px; color: #10b981;">🎯 Expected: ${t.expected_reward}/1.0 | ⚡ Max Steps: ${t.max_steps}</div>
+                        <div style="margin-top: 15px;">
+                            <button class="reset-btn" onclick="resetTask('${t.task_id}')">🔄 Reset</button>
+                            <button id="step-${t.task_id}" onclick="takeStep('${t.task_id}')" disabled>🤖 Take Step</button>
+                            <button id="auto-${t.task_id}" class="auto-btn" onclick="runFullTask('${t.task_id}')" disabled>⚡ Run Full Episode</button>
+                        </div>
+                        <div id="response-${t.task_id}" class="response-area">
+                            <div class="empty-state">🔄 Click "Reset" to start AI inference</div>
                         </div>
                     </div>
                 `).join('');
-            } catch (error) {
-                console.error('Error loading tasks:', error);
-            }
+            } catch(e) { console.error(e); }
         }
-        
+
         checkHealth();
         loadTasks();
         setInterval(checkHealth, 30000);
@@ -735,13 +606,6 @@ def home():
     """
 
 
-# =========================
-# RUN
-# =========================
-
 if __name__ == "__main__":
     import uvicorn
-    print(f"🤖 AI Model: {MODEL_NAME}")
-    print(f"🔑 API Key configured: {bool(API_KEY)}")
-    print(f"🚀 Server starting at http://0.0.0.0:7860")
     uvicorn.run(app, host="0.0.0.0", port=7860)
