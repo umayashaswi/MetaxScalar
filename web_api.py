@@ -50,10 +50,12 @@ class ResetRequest(BaseModel):
     task_id: str
 
 # =========================
-# TASK-SPECIFIC PROMPTS
+# TASK-SPECIFIC PROMPTS (for AI inference - SAME as inference.py)
 # =========================
 
 def get_task_prompt(task_id: str, step_num: int, history: List) -> str:
+    """Get the system prompt for the AI model - MATCHES inference.py"""
+    
     if task_id == "order_status_easy":
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
@@ -87,6 +89,7 @@ def get_task_prompt(task_id: str, step_num: int, history: List) -> str:
         return "Return valid JSON with action_type field."
 
 def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
+    """Fallback action if AI fails"""
     if task_id == "order_status_easy":
         return {"action_type": "lookup_order", "order_id": "12345"}
     
@@ -107,6 +110,9 @@ def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
     return {"action_type": "send_reply", "message": "How can I help you?"}
 
 def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
+    """Call the AI model to get an action - REAL INFERENCE matching inference.py"""
+    
+    # If no API key, use fallback
     if client is None:
         return get_step_default_action(task_id, step_num)
     
@@ -155,44 +161,49 @@ def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
         return get_step_default_action(task_id, step_num)
 
 # =========================
-# ACTION VALIDATION
+# ACTION VALIDATION & REWARD EXPLANATIONS
 # =========================
 
 def validate_action_and_get_explanation(task_id: str, step: int, action_dict: Dict) -> tuple:
+    """Validate action and return (is_valid, reward, explanation, expected_action)"""
+    
     action_type = action_dict.get("action_type", "")
     
+    # Order Status Easy Task
     if task_id == "order_status_easy":
         if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
-            return True, 1.0, "✓ Order lookup successful", "lookup_order"
+            return True, 1.0, "✓ Correct: Order lookup successful", "lookup_order"
         else:
-            return False, -0.3, f"❌ Wrong action! Got: {action_type}, Expected: lookup_order", "lookup_order"
+            return False, -0.3, f"✗ Wrong action! Got: {action_type}, Expected: lookup_order", "lookup_order"
     
+    # Refund Policy Medium Task
     if task_id == "refund_policy_medium":
         if action_type == "send_reply" and "refund" in action_dict.get("message", "").lower():
-            return True, 1.0, "✓ Refund policy explained correctly", "send_reply with 'refund'"
+            return True, 1.0, "✓ Correct: Refund policy explained", "send_reply with 'refund'"
         else:
-            return False, -0.3, "❌ Missing 'refund' in message", "send_reply containing 'refund'"
+            return False, -0.3, "✗ Invalid: Send reply explaining refund policy (must include 'refund')", "send_reply containing 'refund'"
     
+    # Address Change Hard Task
     if task_id == "address_change_hard":
         if step == 1:
             if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
-                return True, 0.6, "✓ Step 1: Order located", "lookup_order with order_id 12345"
+                return True, 0.6, "✓ Step 1/3: Order located successfully", "lookup_order with order_id 12345"
             else:
-                return False, -0.3, f"❌ Step 1 failed! Got: {action_type}, Expected: lookup_order", "lookup_order with order_id 12345"
+                return False, -0.3, f"✗ Step 1/3: Got {action_type}, Expected lookup_order", "lookup_order with order_id 12345"
         
         elif step == 2:
             if action_type == "send_reply" and "address" in action_dict.get("message", "").lower():
-                return True, 0.2, "✓ Step 2: Address requested", "send_reply asking for address"
+                return True, 0.2, "✓ Step 2/3: Address request sent", "send_reply asking for address"
             else:
-                return False, -0.3, "❌ Step 2 failed! Expected: ask for address", "send_reply asking for new address"
+                return False, -0.3, "✗ Step 2/3: Ask customer to provide new address", "send_reply asking for new address"
         
         elif step == 3:
             if action_type == "send_reply" and "confirm" in action_dict.get("message", "").lower():
-                return True, 0.2, "✓ Step 3: Address confirmed - Complete!", "send_reply asking for confirmation"
+                return True, 0.2, "✓ Step 3/3: Address confirmed - Complete!", "send_reply asking for confirmation"
             else:
-                return False, -0.3, "❌ Step 3 failed! Expected: ask for confirmation", "send_reply asking to confirm address"
+                return False, -0.3, "✗ Step 3/3: Ask customer to confirm address", "send_reply asking to confirm address"
     
-    return False, -0.3, "❌ Invalid action format", "valid JSON action"
+    return False, -0.3, "✗ Invalid action format", "valid JSON action"
 
 def get_step_display_name(task_id: str, step: int) -> str:
     if task_id == "address_change_hard":
@@ -249,7 +260,7 @@ def reset_get(task_id: str):
     return reset(req)
 
 # =========================
-# STEP AI
+# STEP AI - WITH REAL INFERENCE
 # =========================
 
 @app.post("/step_ai")
@@ -260,8 +271,16 @@ def step_ai(req: StepRequest):
     session = sessions[req.session_id]
 
     if session["done"]:
+        final_message = ""
+        if session["task_id"] == "address_change_hard":
+            final_message = "🎉 Address change successfully completed!"
+        elif session["task_id"] == "order_status_easy":
+            final_message = "🎉 Order status retrieved successfully!"
+        elif session["task_id"] == "refund_policy_medium":
+            final_message = "🎉 Refund policy explained!"
+        
         return {
-            "message": "✅ Task already completed. Please reset.",
+            "message": f"✅ Task completed. {final_message} Reset to start new.",
             "done": True,
             "score": f"{session['total_reward']:.1f} / 1.0",
             "step": session["steps"]
@@ -269,7 +288,12 @@ def step_ai(req: StepRequest):
 
     env = session["env"]
     step_num = session["steps"] + 1
+    
+    # ============================================
+    # CRITICAL: Call AI model for REAL inference
+    # ============================================
     ai_action = call_ai_model(session["task_id"], step_num, session["history"])
+    
     step_display_name = get_step_display_name(session["task_id"], step_num)
 
     try:
@@ -278,11 +302,14 @@ def step_ai(req: StepRequest):
         ai_action = get_step_default_action(session["task_id"], step_num)
         action = Action(**ai_action)
     
+    # Validate AI's action
     is_valid, reward_value, explanation, expected_action = validate_action_and_get_explanation(
         session["task_id"], step_num, ai_action
     )
     
+    # Take step in environment
     obs, env_reward, done, info = env.step(action)
+    
     final_reward = reward_value
     is_mistake = not is_valid
     
@@ -306,8 +333,6 @@ def step_ai(req: StepRequest):
 
     score_value = min(max(session["total_reward"], 0.0), 1.0)
     score_display = f"{score_value:.1f} / 1.0"
-    expected_steps = 3 if session["task_id"] == "address_change_hard" else 1
-    efficiency = min(100, int((expected_steps / max(session["steps"], 1)) * 100)) if done else 0
     
     return {
         "step": session["steps"],
@@ -323,12 +348,12 @@ def step_ai(req: StepRequest):
         "total_reward": session["total_reward"],
         "total_steps": session["steps"],
         "mistakes_count": len(session["mistakes"]),
-        "efficiency": efficiency,
         "message": "🎉 Task completed successfully!" if done else None
     }
 
+
 # =========================
-# SESSION SUMMARY
+# GET SESSION SUMMARY
 # =========================
 
 @app.get("/session/{session_id}/summary")
@@ -362,8 +387,9 @@ def get_session_summary(session_id: str):
         ]
     }
 
+
 # =========================
-# TASKS
+# TASK LIST
 # =========================
 
 @app.get("/tasks")
@@ -376,6 +402,7 @@ def tasks():
         ]
     }
 
+
 # =========================
 # HEALTH
 # =========================
@@ -384,98 +411,132 @@ def tasks():
 def health():
     return {"status": "healthy", "active_sessions": len(sessions), "ai_model": MODEL_NAME if client else "fallback"}
 
+
 # =========================
-# HOME UI - CLEAN & ORGANIZED
+# HOME UI - SAME BEAUTIFUL UI
 # =========================
 
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Customer Support Environment | AI Agent Training</title>
+    <title>Customer Support Environment</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            padding: 30px;
         }
-        .container { max-width: 1400px; margin: 0 auto; }
-        
-        /* Header */
-        .header { text-align: center; margin-bottom: 40px; }
-        .header h1 { font-size: 3em; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 10px; }
-        .header p { color: rgba(255,255,255,0.7); font-size: 1.1em; }
-        .badge { display: inline-block; background: rgba(102, 126, 234, 0.2); backdrop-filter: blur(10px); padding: 6px 14px; border-radius: 50px; color: #667eea; font-size: 0.8em; margin-top: 12px; }
-        
-        /* Tasks Grid */
-        .tasks-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 25px; margin-bottom: 30px; }
-        
-        /* Task Card */
-        .task-card { background: rgba(255,255,255,0.06); backdrop-filter: blur(10px); border-radius: 20px; padding: 20px; border: 1px solid rgba(255,255,255,0.1); transition: all 0.3s ease; }
-        .task-card:hover { transform: translateY(-3px); background: rgba(255,255,255,0.08); border-color: rgba(102, 126, 234, 0.4); }
-        .task-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-        .task-title { font-size: 1.3em; font-weight: 600; color: white; }
-        .difficulty { padding: 4px 10px; border-radius: 20px; font-size: 0.7em; font-weight: 600; text-transform: uppercase; }
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 40px;
+        }
+        .header h1 { font-size: 3em; margin-bottom: 10px; }
+        .header p { font-size: 1.2em; opacity: 0.9; }
+        .tasks-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 25px;
+        }
+        .task-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease;
+        }
+        .task-card:hover { transform: translateY(-5px); }
+        .task-card h3 { color: #667eea; margin-top: 0; font-size: 1.5em; }
+        .difficulty {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 15px;
+        }
         .easy { background: #10b981; color: white; }
         .medium { background: #f59e0b; color: white; }
         .hard { background: #ef4444; color: white; }
-        .task-desc { color: rgba(255,255,255,0.5); font-size: 0.85em; margin-bottom: 12px; }
-        .reward-badge { background: rgba(16, 185, 129, 0.15); padding: 4px 10px; border-radius: 10px; font-size: 0.75em; color: #10b981; display: inline-block; margin: 3px 3px 3px 0; }
-        
-        /* Buttons */
-        .button-group { display: flex; gap: 10px; margin: 15px 0; flex-wrap: wrap; }
-        button { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 8px 18px; border-radius: 10px; cursor: pointer; font-size: 0.8em; font-weight: 500; transition: all 0.2s ease; }
-        button:hover { transform: scale(1.02); opacity: 0.9; }
-        button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-        .reset-btn { background: linear-gradient(135deg, #f59e0b, #d97706); }
-        .auto-btn { background: linear-gradient(135deg, #10b981, #059669); }
-        
-        /* Response Area */
-        .response-area { background: rgba(0,0,0,0.3); border-radius: 14px; padding: 12px; margin-top: 12px; max-height: 450px; overflow-y: auto; }
-        
-        /* Performance Summary Card */
-        .perf-summary { background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(102, 126, 234, 0.12)); border-radius: 14px; padding: 14px; margin-bottom: 15px; border: 1px solid rgba(16, 185, 129, 0.25); }
-        .perf-title { font-size: 0.75em; text-transform: uppercase; letter-spacing: 1px; color: rgba(255,255,255,0.5); margin-bottom: 10px; }
+        .reward-badge {
+            display: inline-block;
+            background: #e8eaf6;
+            padding: 5px 10px;
+            border-radius: 10px;
+            font-size: 12px;
+            margin: 5px 0;
+        }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin: 5px 5px 5px 0;
+            font-size: 14px;
+            transition: opacity 0.3s ease;
+        }
+        button:hover { opacity: 0.9; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .response-area {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .step-entry {
+            margin-top: 10px;
+            padding: 12px;
+            background: white;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        .status {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: white;
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-size: 14px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .reward-positive { color: #10b981; font-weight: bold; }
+        .reward-negative { color: #ef4444; font-weight: bold; }
+        .completed { color: #10b981; font-weight: bold; font-size: 16px; }
+        .score-large { font-size: 20px; font-weight: bold; color: #667eea; }
+        .explanation { color: #6b7280; font-size: 12px; margin-top: 5px; }
+        .perf-summary { background: #e8eaf6; border-radius: 10px; padding: 12px; margin-bottom: 15px; }
         .perf-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; text-align: center; }
-        .perf-value { font-size: 1.2em; font-weight: 700; color: white; }
-        .perf-label { font-size: 0.65em; color: rgba(255,255,255,0.5); }
-        .progress-bar-container { background: rgba(255,255,255,0.1); border-radius: 20px; height: 6px; margin: 10px 0; overflow: hidden; }
-        .progress-fill { background: linear-gradient(90deg, #10b981, #667eea); height: 100%; border-radius: 20px; transition: width 0.3s ease; width: 0%; }
-        .intel-score { text-align: center; margin-top: 10px; padding: 8px; background: rgba(102, 126, 234, 0.2); border-radius: 10px; }
-        .intel-value { font-size: 1.3em; font-weight: 700; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        
-        /* Step Item */
-        .step-item { display: flex; align-items: center; gap: 10px; padding: 8px; margin: 6px 0; background: rgba(255,255,255,0.04); border-radius: 10px; }
-        .step-icon { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.9em; }
-        .step-icon.success { background: rgba(16, 185, 129, 0.2); color: #10b981; }
-        .step-icon.failed { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
-        .step-content { flex: 1; }
-        .step-name { color: white; font-weight: 500; font-size: 0.85em; }
-        .step-detail { font-size: 0.7em; color: rgba(255,255,255,0.45); margin-top: 2px; }
-        .step-reward { font-size: 0.75em; font-weight: 600; }
-        .step-reward.positive { color: #10b981; }
-        .step-reward.negative { color: #ef4444; }
-        
-        .empty-state { text-align: center; color: rgba(255,255,255,0.35); padding: 25px; font-size: 0.85em; }
-        .status { position: fixed; bottom: 15px; right: 15px; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); padding: 6px 14px; border-radius: 30px; font-size: 0.75em; color: #10b981; }
+        .perf-value { font-size: 1.2em; font-weight: bold; color: #667eea; }
+        .perf-label { font-size: 0.7em; color: #666; }
+        .progress-bar { background: #ddd; border-radius: 10px; height: 6px; margin: 10px 0; overflow: hidden; }
+        .progress-fill { background: linear-gradient(90deg, #10b981, #667eea); height: 100%; width: 0%; transition: width 0.3s ease; }
+        .intel-score { text-align: center; margin-top: 10px; padding: 8px; background: linear-gradient(135deg, #667eea20, #764ba220); border-radius: 8px; }
+        .intel-value { font-size: 1.3em; font-weight: bold; color: #667eea; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🎯 Customer Support Environment</h1>
-            <p>AI Agent Training | Explainable Rewards | Real-time Performance Analytics</p>
-            <div class="badge">🚀 OpenEnv Compliant | Real LLaMA 3.1 Inference</div>
-        </div>
-        <div class="tasks-grid" id="tasks"></div>
-        <div class="status" id="status">🟢 System Online</div>
+    <div class="header">
+        <h1>🎯 Customer Support Environment</h1>
+        <p>Real AI Inference (LLaMA 3.1) | Explainable Rewards | Performance Analytics</p>
     </div>
+    
+    <div class="tasks-grid" id="tasks"></div>
+    
+    <div class="status" id="status">🟢 Healthy</div>
+    
     <script>
         const API_BASE = window.location.origin;
         let currentSessions = {};
@@ -483,120 +544,186 @@ def home():
         
         async function checkHealth() {
             try {
-                const res = await fetch(`${API_BASE}/health`);
-                const data = await res.json();
-                document.getElementById('status').innerHTML = `🟢 Online | ${data.active_sessions} Sessions | 🤖 ${data.ai_model || 'LLaMA'}`;
-            } catch(e) { document.getElementById('status').innerHTML = '🔴 Offline'; }
+                const response = await fetch(`${API_BASE}/health`);
+                const data = await response.json();
+                document.getElementById('status').innerHTML = `🟢 Healthy | ${data.active_sessions} active | 🤖 ${data.ai_model || 'LLaMA'}`;
+            } catch (error) {
+                document.getElementById('status').innerHTML = '🔴 Error';
+            }
         }
         
         async function fetchSummary(sessionId, taskId) {
             try {
-                const res = await fetch(`${API_BASE}/session/${sessionId}/summary`);
-                const data = await res.json();
+                const response = await fetch(`${API_BASE}/session/${sessionId}/summary`);
+                const data = await response.json();
                 sessionSummaries[taskId] = data;
                 return data;
-            } catch(e) { return null; }
+            } catch (error) {
+                return null;
+            }
         }
         
         function renderPerfSummary(summary) {
             if (!summary || summary.steps_taken === 0) return '';
             const progress = summary.score_value * 100;
-            return `<div class="perf-summary">
-                <div class="perf-title">📊 PERFORMANCE SUMMARY</div>
-                <div class="perf-grid">
-                    <div><div class="perf-value">${summary.steps_taken}/${summary.expected_steps}</div><div class="perf-label">STEPS</div></div>
-                    <div><div class="perf-value">${summary.efficiency}%</div><div class="perf-label">EFFICIENCY</div></div>
-                    <div><div class="perf-value">${summary.mistakes}</div><div class="perf-label">MISTAKES</div></div>
-                    <div><div class="perf-value">${summary.score}</div><div class="perf-label">SCORE</div></div>
+            return `
+                <div class="perf-summary">
+                    <div class="perf-grid">
+                        <div><div class="perf-value">${summary.steps_taken}/${summary.expected_steps}</div><div class="perf-label">STEPS</div></div>
+                        <div><div class="perf-value">${summary.efficiency}%</div><div class="perf-label">EFFICIENCY</div></div>
+                        <div><div class="perf-value">${summary.mistakes}</div><div class="perf-label">MISTAKES</div></div>
+                        <div><div class="perf-value">${summary.score}</div><div class="perf-label">SCORE</div></div>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill" style="width: ${progress}%"></div></div>
+                    <div class="intel-score"><div class="perf-label">🤖 AGENT INTELLIGENCE SCORE</div><div class="intel-value">${summary.intelligence_score}</div></div>
                 </div>
-                <div class="progress-bar-container"><div class="progress-fill" style="width: ${progress}%"></div></div>
-                <div class="intel-score"><div class="perf-label">🤖 AGENT INTELLIGENCE SCORE</div><div class="intel-value">${summary.intelligence_score}</div></div>
-            </div>`;
+            `;
         }
         
         function renderSteps(steps) {
-            if (!steps || steps.length === 0) return '<div class="empty-state">🤖 Click "Take Step" to start AI inference</div>';
-            return steps.map(s => `<div class="step-item">
-                <div class="step-icon ${s.reward >= 0 ? 'success' : 'failed'}">${s.reward >= 0 ? '✓' : '✗'}</div>
-                <div class="step-content"><div class="step-name">${s.name}</div><div class="step-detail">${s.explanation}</div></div>
-                <div class="step-reward ${s.reward >= 0 ? 'positive' : 'negative'}">${s.reward >= 0 ? '+' : ''}${s.reward}</div>
-            </div>`).reverse().join('');
+            if (!steps || steps.length === 0) return '<div style="text-align: center; color: #999; padding: 20px;">🤖 Click "Take Step" to start AI inference</div>';
+            return steps.map(s => `
+                <div class="step-entry">
+                    <strong>Step ${s.step}: ${s.name}</strong><br>
+                    <strong>Reward:</strong> <span class="${s.reward >= 0 ? 'reward-positive' : 'reward-negative'}">${s.reward >= 0 ? '+' : ''}${s.reward}</span><br>
+                    <div class="explanation">📖 ${s.explanation}</div>
+                </div>
+            `).reverse().join('');
         }
         
         async function resetTask(taskId) {
             try {
-                const res = await fetch(`${API_BASE}/reset/${taskId}`);
-                const data = await res.json();
+                const response = await fetch(`${API_BASE}/reset/${taskId}`);
+                const data = await response.json();
                 currentSessions[taskId] = data.session_id;
                 delete sessionSummaries[taskId];
-                document.getElementById(`response-${taskId}`).innerHTML = '<div class="empty-state">🔄 Environment reset. AI agent ready.</div>';
+                
+                const responseDiv = document.getElementById(`response-${taskId}`);
+                responseDiv.innerHTML = `<div class="step-entry" style="background: #e8f5e9; border-left-color: #4caf50;">
+                    ✅ ${data.message}<br>
+                    <strong>Score:</strong> ${data.score}
+                </div>`;
+                
                 const stepBtn = document.getElementById(`step-${taskId}`);
                 stepBtn.disabled = false;
                 stepBtn.textContent = '🤖 Take Step';
+                
                 const autoBtn = document.getElementById(`auto-${taskId}`);
-                if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = '⚡ Run Full Episode'; }
-            } catch(e) { alert('Reset error: ' + e.message); }
+                if (autoBtn) autoBtn.disabled = false;
+                autoBtn.textContent = '⚡ Run Full Task';
+            } catch (error) {
+                alert('Error resetting task: ' + error.message);
+            }
         }
         
         async function takeStep(taskId) {
-            if (!currentSessions[taskId]) { alert('Please reset first!'); return; }
+            if (!currentSessions[taskId]) {
+                alert('Please reset the task first!');
+                return;
+            }
+            
             const stepBtn = document.getElementById(`step-${taskId}`);
             stepBtn.disabled = true;
-            stepBtn.textContent = '⏳ Thinking...';
+            stepBtn.textContent = '⏳ AI Thinking...';
+            
             try {
-                await fetch(`${API_BASE}/step_ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: currentSessions[taskId] }) });
+                await fetch(`${API_BASE}/step_ai`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: currentSessions[taskId] })
+                });
+                
                 const summary = await fetchSummary(currentSessions[taskId], taskId);
-                const div = document.getElementById(`response-${taskId}`);
-                if (summary) div.innerHTML = renderPerfSummary(summary) + renderSteps(summary.steps_history);
+                const responseDiv = document.getElementById(`response-${taskId}`);
+                
+                if (summary) {
+                    responseDiv.innerHTML = renderPerfSummary(summary) + renderSteps(summary.steps_history);
+                }
+                
                 if (summary?.completed) {
                     stepBtn.disabled = true;
-                    stepBtn.textContent = '✅ Complete';
+                    stepBtn.textContent = '✅ Completed';
                     const autoBtn = document.getElementById(`auto-${taskId}`);
                     if (autoBtn) autoBtn.disabled = true;
                 } else {
                     stepBtn.disabled = false;
-                    stepBtn.textContent = '🤖 Next Step';
+                    stepBtn.textContent = '🤖 Take Next Step';
                 }
-            } catch(e) { alert('Step error: ' + e.message); stepBtn.disabled = false; stepBtn.textContent = '🤖 Retry'; }
+            } catch (error) {
+                alert('Error: ' + error.message);
+                stepBtn.disabled = false;
+                stepBtn.textContent = '🤖 Retry';
+            }
         }
         
         async function runFullTask(taskId) {
-            if (!currentSessions[taskId]) { await resetTask(taskId); await new Promise(r => setTimeout(r, 400)); }
+            if (!currentSessions[taskId]) {
+                await resetTask(taskId);
+                await new Promise(r => setTimeout(r, 500));
+            }
+            
             const stepBtn = document.getElementById(`step-${taskId}`);
             const autoBtn = document.getElementById(`auto-${taskId}`);
             autoBtn.disabled = true;
-            autoBtn.textContent = '🏃 Running...';
+            autoBtn.textContent = '🏃 AI Running...';
             stepBtn.disabled = true;
-            let done = false, maxSteps = taskId === 'address_change_hard' ? 5 : 3, iter = 0;
-            while (!done && iter < maxSteps) {
-                await new Promise(r => setTimeout(r, 450));
-                await fetch(`${API_BASE}/step_ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: currentSessions[taskId] }) });
+            
+            let done = false;
+            let maxSteps = taskId === 'address_change_hard' ? 5 : 3;
+            let stepsTaken = 0;
+            
+            while (!done && stepsTaken < maxSteps) {
+                await new Promise(r => setTimeout(r, 400));
+                
+                await fetch(`${API_BASE}/step_ai`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: currentSessions[taskId] })
+                });
+                
                 const summary = await fetchSummary(currentSessions[taskId], taskId);
-                const div = document.getElementById(`response-${taskId}`);
-                if (summary) div.innerHTML = renderPerfSummary(summary) + renderSteps(summary.steps_history);
-                done = summary?.completed || false;
-                iter++;
+                const responseDiv = document.getElementById(`response-${taskId}`);
+                
+                if (summary) {
+                    responseDiv.innerHTML = renderPerfSummary(summary) + renderSteps(summary.steps_history);
+                    done = summary.completed;
+                }
+                stepsTaken++;
             }
+            
             autoBtn.disabled = true;
-            autoBtn.textContent = '✅ Complete';
-            if (!done) stepBtn.disabled = false;
+            autoBtn.textContent = '✅ Done';
+            if (!done) {
+                stepBtn.disabled = false;
+                stepBtn.textContent = '🤖 Continue';
+            }
         }
         
         async function loadTasks() {
             try {
-                const res = await fetch(`${API_BASE}/tasks`);
-                const data = await res.json();
-                const grid = document.getElementById('tasks');
-                grid.innerHTML = data.tasks.map(t => `<div class="task-card">
-                    <div class="task-header"><span class="task-title">${t.icon} ${t.name}</span><span class="difficulty ${t.difficulty}">${t.difficulty.toUpperCase()}</span></div>
-                    <div class="task-desc">${t.description}</div>
-                    <div class="reward-badge">🎯 Expected Reward: ${t.expected_reward} / 1.0</div>
-                    ${t.steps_detail ? t.steps_detail.map(s => `<div class="reward-badge">📋 ${s}</div>`).join('') : ''}
-                    <div class="reward-badge">⚡ Max Steps: ${t.max_steps}</div>
-                    <div class="button-group"><button class="reset-btn" onclick="resetTask('${t.task_id}')">🔄 Reset</button><button id="step-${t.task_id}" onclick="takeStep('${t.task_id}')" disabled>🤖 Take Step</button><button id="auto-${t.task_id}" class="auto-btn" onclick="runFullTask('${t.task_id}')" disabled>⚡ Run Full Episode</button></div>
-                    <div id="response-${t.task_id}" class="response-area"><div class="empty-state">🔄 Click "Reset" to start</div></div>
-                </div>`).join('');
-            } catch(e) { console.error(e); }
+                const response = await fetch(`${API_BASE}/tasks`);
+                const data = await response.json();
+                
+                const tasksGrid = document.getElementById('tasks');
+                tasksGrid.innerHTML = data.tasks.map(task => `
+                    <div class="task-card">
+                        <h3>${task.icon || '🎯'} ${task.name}</h3>
+                        <span class="difficulty ${task.difficulty}">${task.difficulty.toUpperCase()}</span>
+                        <p>${task.description}</p>
+                        <div class="reward-badge">🎯 Expected Reward: ${task.expected_reward} / 1.0</div>
+                        ${task.steps_detail ? task.steps_detail.map(step => `<div class="reward-badge">📋 ${step}</div>`).join('') : ''}
+                        <p><strong>Max steps:</strong> ${task.max_steps}</p>
+                        <button onclick="resetTask('${task.task_id}')">🔄 Reset</button>
+                        <button id="step-${task.task_id}" onclick="takeStep('${task.task_id}')" disabled>🤖 Take Step</button>
+                        <button id="auto-${task.task_id}" onclick="runFullTask('${task.task_id}')" disabled>⚡ Run Full Task</button>
+                        <div id="response-${task.task_id}" class="response-area">
+                            <div style="color: #999; text-align: center;">Click Reset to start</div>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Error loading tasks:', error);
+            }
         }
         
         checkHealth();
@@ -606,6 +733,7 @@ def home():
 </body>
 </html>
     """
+
 
 # =========================
 # RUN
