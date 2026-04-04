@@ -20,22 +20,38 @@ from app.models import Action, Observation, Reward
 from openai import OpenAI
 
 # =========================
-# CONFIG
+# CONFIG - FIXED FOR HF SPACES
 # =========================
 
-# Get API credentials from environment variables (secrets in HF Spaces)
-GROQ_API_KEY = os.getenv("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"
+# Try multiple environment variable names (HF Spaces secrets)
+api_key = (
+    os.getenv("GROQ_API_KEY") or 
+    os.getenv("OPENAI_API_KEY") or 
+    os.getenv("HF_TOKEN")  # Automatic in HF Spaces
 )
+
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
 
-if not GROQ_API_KEY:
-    print("WARNING: GROQ_API_KEY not set. AI actions will use fallback.")
+# Debug output (visible in build logs)
+print(f"[Config] API Key set: {bool(api_key)}")
+print(f"[Config] Base URL: {API_BASE_URL}")
+print(f"[Config] Model: {MODEL_NAME}")
 
-client = OpenAI(
-    api_key=GROQ_API_KEY,
-    base_url=API_BASE_URL
-)
+# Initialize client only if we have a key
+if api_key:
+    try:
+        client = OpenAI(
+            api_key=api_key,
+            base_url=API_BASE_URL
+        )
+        print("[Config] OpenAI client initialized successfully")
+    except Exception as e:
+        print(f"[Config] Error initializing client: {e}")
+        client = None
+else:
+    print("[Config] WARNING: No API key found. AI actions will use fallback.")
+    client = None
 
 # =========================
 # TASK-SPECIFIC PROMPTS (copied from inference.py)
@@ -107,6 +123,11 @@ def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
 
 def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
     """Call the AI model to get an action (same as inference.py)"""
+    
+    # If no client, use fallback
+    if client is None:
+        return get_step_default_action(task_id, step_num)
+    
     sys_prompt = get_task_prompt(task_id, step_num, history)
     
     try:
@@ -165,7 +186,6 @@ app = FastAPI(
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     """Serve the web interface"""
-    # Built-in HTML interface with AI integration
     return """
 <!DOCTYPE html>
 <html lang="en">
@@ -307,7 +327,7 @@ async def serve_ui():
                 taskSteps[taskId] = 0;
                 
                 const responseDiv = document.getElementById(`response-${taskId}`);
-                responseDiv.innerHTML = `<div style="color: green;">✅ Session created: ${currentSessions[taskId].substring(0, 50)}...</div>`;
+                responseDiv.innerHTML = `<div style="color: green;">✅ Session created</div>`;
                 
                 const stepBtn = document.getElementById(`step-${taskId}`);
                 stepBtn.disabled = false;
@@ -375,7 +395,6 @@ async def serve_ui():
                 await new Promise(r => setTimeout(r, 500));
             }
             
-            const stepBtn = document.getElementById(`step-${taskId}`);
             const autoBtn = document.getElementById(`auto-${taskId}`);
             autoBtn.disabled = true;
             autoBtn.textContent = '🏃 Running...';
@@ -412,8 +431,8 @@ async def serve_ui():
             
             autoBtn.disabled = true;
             autoBtn.textContent = '✅ Done';
-            const stepBtn2 = document.getElementById(`step-${taskId}`);
-            stepBtn2.disabled = true;
+            const stepBtn = document.getElementById(`step-${taskId}`);
+            stepBtn.disabled = true;
         }
         
         async function loadTasks() {
@@ -458,14 +477,7 @@ sessions = {}
 class StepRequest(BaseModel):
     """Request model for step action"""
     task_id: str
-    action: Dict[str, Any] = {}  # Made optional - AI will decide if empty
-
-class StepResponse(BaseModel):
-    """Response model for step action"""
-    observation: Dict[str, Any]
-    reward: float
-    done: bool
-    info: Dict[str, Any]
+    action: Dict[str, Any] = {}
 
 class TaskInfo(BaseModel):
     """Task information"""
@@ -476,7 +488,7 @@ class TaskInfo(BaseModel):
     max_steps: int
 
 # =========================
-# AI-POWERED STEP ENDPOINT (NEW)
+# AI-POWERED STEP ENDPOINT
 # =========================
 
 @app.post("/step_ai")
@@ -491,9 +503,8 @@ async def step_ai(request: StepRequest):
             break
     
     if not session_id:
-        # Create new session
         env = CustomerSupportEnv(request.task_id)
-        obs = env.reset()
+        env.reset()
         session_id = f"{request.task_id}_{id(env)}"
         sessions[session_id] = {
             "env": env,
@@ -506,14 +517,13 @@ async def step_ai(request: StepRequest):
     env = sessions[session_id]["env"]
     current_step = sessions[session_id]["steps"] + 1
     
-    # Call AI model to get action (same as inference.py)
+    # Call AI model to get action
     action_dict = call_ai_model(request.task_id, current_step, sessions[session_id]["history"])
     
     # Create action from AI response
     try:
         action = Action(**action_dict)
-    except Exception as e:
-        # Fallback to default action
+    except Exception:
         action_dict = get_step_default_action(request.task_id, current_step)
         action = Action(**action_dict)
     
@@ -540,13 +550,12 @@ async def step_ai(request: StepRequest):
     }
 
 # =========================
-# ORIGINAL STEP ENDPOINT (kept for compatibility)
+# ORIGINAL STEP ENDPOINT
 # =========================
 
 @app.post("/step")
 async def step_environment(request: StepRequest):
     """Take a step in the environment (manual action)"""
-    # Find session
     session_id = None
     for sid, session in sessions.items():
         if session["task_id"] == request.task_id:
@@ -554,54 +563,40 @@ async def step_environment(request: StepRequest):
             break
     
     if not session_id:
-        try:
-            env = CustomerSupportEnv(request.task_id)
-            obs = env.reset()
-            session_id = f"{request.task_id}_{id(env)}"
-            sessions[session_id] = {
-                "env": env,
-                "task_id": request.task_id,
-                "rewards": [],
-                "steps": 0,
-                "history": []
-            }
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error creating session: {str(e)}")
+        env = CustomerSupportEnv(request.task_id)
+        env.reset()
+        session_id = f"{request.task_id}_{id(env)}"
+        sessions[session_id] = {
+            "env": env,
+            "task_id": request.task_id,
+            "rewards": [],
+            "steps": 0,
+            "history": []
+        }
     
     env = sessions[session_id]["env"]
     
-    try:
-        if "action_type" not in request.action:
-            raise HTTPException(status_code=400, detail="Action must contain 'action_type' field")
-        
-        action = Action(**request.action)
-        obs, reward, done, info = env.step(action)
-        
-        sessions[session_id]["rewards"].append(reward.value)
-        sessions[session_id]["steps"] += 1
-        sessions[session_id]["history"].append(request.action)
-        
-        total_score = sum(sessions[session_id]["rewards"])
-        normalized_score = min(max(total_score, 0.0), 1.0)
-        
-        return {
-            "session_id": session_id,
-            "step": sessions[session_id]["steps"],
-            "observation": {
-                "task_id": obs.task_id,
-                "history": obs.history,
-                "done": obs.done
-            },
-            "reward": reward.value,
-            "done": done,
-            "score": normalized_score,
-            "total_reward": total_score,
-            "info": info
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error taking step: {str(e)}")
+    if "action_type" not in request.action:
+        raise HTTPException(status_code=400, detail="Action must contain 'action_type' field")
+    
+    action = Action(**request.action)
+    obs, reward, done, info = env.step(action)
+    
+    sessions[session_id]["rewards"].append(reward.value)
+    sessions[session_id]["steps"] += 1
+    sessions[session_id]["history"].append(request.action)
+    
+    total_score = sum(sessions[session_id]["rewards"])
+    normalized_score = min(max(total_score, 0.0), 1.0)
+    
+    return {
+        "session_id": session_id,
+        "step": sessions[session_id]["steps"],
+        "reward": reward.value,
+        "done": done,
+        "score": normalized_score,
+        "total_reward": total_score
+    }
 
 # =========================
 # HEALTH AND TASKS ENDPOINTS
@@ -609,18 +604,16 @@ async def step_environment(request: StepRequest):
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for HF Spaces"""
     return {
         "status": "healthy",
         "service": "customer-support-env",
         "ready": True,
         "sessions": len(sessions),
-        "model": MODEL_NAME
+        "model": MODEL_NAME if MODEL_NAME else "unknown"
     }
 
 @app.get("/tasks")
 async def list_tasks():
-    """List all available tasks"""
     tasks = [
         TaskInfo(
             task_id="order_status_easy",
@@ -648,35 +641,30 @@ async def list_tasks():
 
 @app.get("/reset/{task_id}")
 async def reset_environment(task_id: str):
-    """Reset environment for a specific task"""
     valid_tasks = ["order_status_easy", "refund_policy_medium", "address_change_hard"]
     if task_id not in valid_tasks:
         raise HTTPException(status_code=400, detail=f"Invalid task_id: {task_id}")
     
-    try:
-        env = CustomerSupportEnv(task_id)
-        obs = env.reset()
-        
-        session_id = f"{task_id}_{id(env)}"
-        sessions[session_id] = {
-            "env": env,
-            "task_id": task_id,
-            "rewards": [],
-            "steps": 0,
-            "history": []
-        }
-        
-        return {
-            "session_id": session_id,
-            "task_id": task_id,
-            "message": f"Environment reset for task: {task_id}"
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error resetting environment: {str(e)}")
+    env = CustomerSupportEnv(task_id)
+    env.reset()
+    
+    session_id = f"{task_id}_{id(env)}"
+    sessions[session_id] = {
+        "env": env,
+        "task_id": task_id,
+        "rewards": [],
+        "steps": 0,
+        "history": []
+    }
+    
+    return {
+        "session_id": session_id,
+        "task_id": task_id,
+        "message": f"Environment reset for task: {task_id}"
+    }
 
 @app.get("/score/{session_id}")
 async def get_score(session_id: str):
-    """Get current score for a session"""
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
     
@@ -690,43 +678,13 @@ async def get_score(session_id: str):
         "rewards": rewards,
         "total_reward": total_score,
         "normalized_score": normalized_score,
-        "steps": sessions[session_id]["steps"],
-        "max_possible_score": 1.0,
-        "completion_percentage": f"{normalized_score * 100:.1f}%"
+        "steps": sessions[session_id]["steps"]
     }
-
-@app.get("/sessions")
-async def list_sessions():
-    """List all active sessions"""
-    return {
-        "active_sessions": len(sessions),
-        "sessions": [
-            {
-                "session_id": sid,
-                "task_id": session["task_id"],
-                "steps": session["steps"],
-                "rewards": session["rewards"],
-                "total_reward": sum(session["rewards"])
-            }
-            for sid, session in sessions.items()
-        ]
-    }
-
-@app.delete("/session/{session_id}")
-async def delete_session(session_id: str):
-    """Delete a session"""
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
-    
-    del sessions[session_id]
-    return {"message": f"Session {session_id} deleted successfully"}
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Clean up sessions on shutdown"""
     sessions.clear()
 
-# For direct execution
 if __name__ == "__main__":
     print("Starting Customer Support Environment API Server...")
     print(f"Using model: {MODEL_NAME}")
