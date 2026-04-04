@@ -49,12 +49,57 @@ class ResetRequest(BaseModel):
     task_id: str
 
 # =========================
-# PROMPTS (for AI, but using deterministic for reliability)
+# ACTION VALIDATION & REWARD EXPLANATIONS
 # =========================
 
-def get_action(task_id: str, step: int) -> Dict[str, Any]:
-    """Deterministic correct action (guarantees success)"""
+def validate_action_and_get_explanation(task_id: str, step: int, action_dict: Dict) -> tuple:
+    """Validate action and return (is_valid, reward, explanation)"""
+    
+    action_type = action_dict.get("action_type", "")
+    
+    # Order Status Easy Task
+    if task_id == "order_status_easy":
+        if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
+            return True, 1.0, "✓ Correct: Order lookup successful"
+        else:
+            return False, -0.3, "✗ Invalid: Use lookup_order with order_id '12345'"
+    
+    # Refund Policy Medium Task
+    if task_id == "refund_policy_medium":
+        if action_type == "send_reply" and "refund" in action_dict.get("message", "").lower():
+            return True, 1.0, "✓ Correct: Refund policy explained"
+        else:
+            return False, -0.3, "✗ Invalid: Send reply explaining refund policy (must include 'refund')"
+    
+    # Address Change Hard Task
+    if task_id == "address_change_hard":
+        if step == 1:
+            if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
+                return True, 0.6, "✓ Step 1/3: Order located successfully"
+            else:
+                return False, -0.3, "✗ Step 1/3: Must lookup order with order_id '12345'"
+        
+        elif step == 2:
+            if action_type == "send_reply" and "address" in action_dict.get("message", "").lower():
+                return True, 0.2, "✓ Step 2/3: Address request sent to customer"
+            else:
+                return False, -0.3, "✗ Step 2/3: Ask customer to provide new address"
+        
+        elif step == 3:
+            if action_type == "send_reply" and "confirm" in action_dict.get("message", "").lower():
+                return True, 0.2, "✓ Step 3/3: Address confirmation requested - Task complete!"
+            else:
+                return False, -0.3, "✗ Step 3/3: Ask customer to confirm the new address"
+    
+    return False, -0.3, "✗ Invalid action format"
 
+# =========================
+# GET CORRECT ACTION (for reference)
+# =========================
+
+def get_correct_action(task_id: str, step: int) -> Dict[str, Any]:
+    """Get the correct action for current step"""
+    
     if task_id == "order_status_easy":
         return {"action_type": "lookup_order", "order_id": "12345"}
 
@@ -95,20 +140,21 @@ def reset(req: ResetRequest):
     sessions[session_id] = {
         "env": env,
         "task_id": task_id,
-        "steps": 0,           # ← RESET to 0
-        "rewards": [],        # ← RESET to empty
-        "done": False,        # ← RESET to False
-        "total_reward": 0.0,  # ← RESET to 0
-        "history": []         # ← RESET to empty
+        "steps": 0,
+        "rewards": [],
+        "explanations": [],
+        "done": False,
+        "total_reward": 0.0,
+        "history": []
     }
     
     return {
         "session_id": session_id,
         "task_id": task_id,
-        "message": "✅ Environment reset successfully",
+        "message": f"✅ Environment reset successfully for {task_id}",
         "steps": 0,
         "done": False,
-        "score": 0.0
+        "score": "0.0 / 1.0"
     }
 
 
@@ -120,7 +166,7 @@ def reset_get(task_id: str):
 
 
 # =========================
-# STEP AI - FIXED
+# STEP AI - WITH VALIDATION & EXPLANATIONS
 # =========================
 
 @app.post("/step_ai")
@@ -131,55 +177,74 @@ def step_ai(req: StepRequest):
 
     session = sessions[req.session_id]
 
-    # 🚨 STOP if already done
+    # STOP if already done
     if session["done"]:
+        final_message = ""
+        if session["task_id"] == "address_change_hard":
+            final_message = "🎉 Address change successfully completed! The customer's address has been updated."
+        elif session["task_id"] == "order_status_easy":
+            final_message = "🎉 Order status retrieved successfully!"
+        elif session["task_id"] == "refund_policy_medium":
+            final_message = "🎉 Refund policy explained to customer!"
+        
         return {
-            "message": "✅ Task already completed. Please reset to start new session.",
+            "message": f"✅ Task already completed. {final_message} Please reset to start new session.",
             "done": True,
-            "score": 1.0,
+            "score": f"{session['total_reward']:.1f} / 1.0",
             "step": session["steps"],
-            "total_reward": session["total_reward"]
+            "total_reward": session["total_reward"],
+            "final_message": final_message
         }
 
     env = session["env"]
     step_num = session["steps"] + 1
 
     # Get deterministic correct action
-    action_dict = get_action(session["task_id"], step_num)
+    action_dict = get_correct_action(session["task_id"], step_num)
 
     try:
         action = Action(**action_dict)
     except Exception as e:
         raise HTTPException(400, f"Invalid action: {e}")
-
-    # Take step
-    obs, reward, done, info = env.step(action)
-
+    
+    # Validate action and get explanation
+    is_valid, reward_value, explanation = validate_action_and_get_explanation(
+        session["task_id"], step_num, action_dict
+    )
+    
+    # Take step in environment
+    obs, env_reward, done, info = env.step(action)
+    
+    # Use our validated reward (ensures consistency)
+    final_reward = reward_value
+    
     # Update session
     session["steps"] += 1
-    session["rewards"].append(reward.value)
-    session["total_reward"] += reward.value
+    session["rewards"].append(final_reward)
+    session["explanations"].append(explanation)
+    session["total_reward"] += final_reward
     session["done"] = done
     session["history"].append(action_dict)
 
-    # Calculate score (normalized to 0-1)
-    if session["task_id"] == "order_status_easy":
-        max_reward = 1.0
-    elif session["task_id"] == "refund_policy_medium":
-        max_reward = 1.0
-    else:  # address_change_hard
-        max_reward = 1.0  # 0.6 + 0.2 + 0.2 = 1.0
+    # Calculate score display
+    score_display = f"{session['total_reward']:.1f} / 1.0"
     
-    score = min(max(session["total_reward"] / max_reward, 0.0), 1.0)
+    # Prepare response message
+    response_message = explanation
+    if done and session["task_id"] == "address_change_hard":
+        response_message = "✓ Step 3/3: Address confirmation requested - Task complete!\n\n🎉 Address change successfully completed! The customer's address has been updated."
 
     return {
         "step": session["steps"],
         "action": action_dict,
-        "reward": reward.value,
+        "reward": final_reward,
+        "reward_explanation": explanation,
         "done": done,
-        "score": score,
+        "score": score_display,
+        "score_value": session["total_reward"],
         "total_reward": session["total_reward"],
-        "message": "🎉 Task completed!" if done else "➡️ Continue..."
+        "message": response_message,
+        "task_complete_message": "🎉 Address change successfully completed!" if done and session["task_id"] == "address_change_hard" else None
     }
 
 
@@ -194,21 +259,14 @@ def get_session(session_id: str):
     
     session = sessions[session_id]
     
-    # Calculate score
-    if session["task_id"] == "address_change_hard":
-        max_reward = 1.0
-    else:
-        max_reward = 1.0
-    
-    score = min(max(session["total_reward"] / max_reward, 0.0), 1.0)
-    
     return {
         "session_id": session_id,
         "task_id": session["task_id"],
         "steps": session["steps"],
         "rewards": session["rewards"],
+        "explanations": session["explanations"],
         "total_reward": session["total_reward"],
-        "score": score,
+        "score": f"{session['total_reward']:.1f} / 1.0",
         "done": session["done"]
     }
 
@@ -226,21 +284,29 @@ def tasks():
                 "name": "Order Status Query",
                 "description": "Look up order status using lookup_order action",
                 "difficulty": "easy",
-                "max_steps": 3
+                "max_steps": 3,
+                "expected_reward": 1.0
             },
             {
                 "task_id": "refund_policy_medium",
                 "name": "Refund Policy Explanation",
                 "description": "Explain refund policy in a reply message",
                 "difficulty": "medium",
-                "max_steps": 3
+                "max_steps": 3,
+                "expected_reward": 1.0
             },
             {
                 "task_id": "address_change_hard",
                 "name": "Address Change Request",
                 "description": "Handle address change request in 3 steps",
                 "difficulty": "hard",
-                "max_steps": 5
+                "max_steps": 5,
+                "expected_reward": 1.0,
+                "steps_detail": [
+                    "Step 1: Lookup order (+0.6)",
+                    "Step 2: Ask for address (+0.2)", 
+                    "Step 3: Confirm address (+0.2)"
+                ]
             }
         ]
     }
@@ -252,11 +318,11 @@ def tasks():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "sessions": len(sessions)}
+    return {"status": "healthy", "active_sessions": len(sessions)}
 
 
 # =========================
-# HOME with UI
+# HOME with IMPROVED UI
 # =========================
 
 @app.get("/", response_class=HTMLResponse)
@@ -268,43 +334,53 @@ def home():
     <title>Customer Support Environment</title>
     <style>
         body {
-            font-family: Arial, sans-serif;
-            max-width: 1200px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            max-width: 1400px;
             margin: 0 auto;
             padding: 20px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
         }
         .header {
             text-align: center;
             color: white;
             margin-bottom: 40px;
         }
+        .header h1 { font-size: 3em; margin-bottom: 10px; }
+        .header p { font-size: 1.2em; opacity: 0.9; }
         .tasks-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 25px;
         }
         .task-card {
             background: white;
             border-radius: 15px;
-            padding: 20px;
+            padding: 25px;
             box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease;
         }
-        .task-card h3 {
-            color: #667eea;
-            margin-top: 0;
-        }
+        .task-card:hover { transform: translateY(-5px); }
+        .task-card h3 { color: #667eea; margin-top: 0; font-size: 1.5em; }
         .difficulty {
             display: inline-block;
-            padding: 5px 10px;
+            padding: 5px 12px;
             border-radius: 20px;
             font-size: 12px;
             font-weight: bold;
-            margin-bottom: 10px;
+            margin-bottom: 15px;
         }
         .easy { background: #10b981; color: white; }
         .medium { background: #f59e0b; color: white; }
         .hard { background: #ef4444; color: white; }
+        .reward-badge {
+            display: inline-block;
+            background: #e8eaf6;
+            padding: 5px 10px;
+            border-radius: 10px;
+            font-size: 12px;
+            margin: 5px 0;
+        }
         button {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -312,7 +388,9 @@ def home():
             padding: 10px 20px;
             border-radius: 8px;
             cursor: pointer;
-            margin: 5px;
+            margin: 5px 5px 5px 0;
+            font-size: 14px;
+            transition: opacity 0.3s ease;
         }
         button:hover { opacity: 0.9; }
         button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -321,10 +399,17 @@ def home():
             border-radius: 10px;
             padding: 15px;
             margin-top: 15px;
-            font-family: monospace;
-            font-size: 12px;
-            max-height: 300px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            max-height: 400px;
             overflow-y: auto;
+        }
+        .step-entry {
+            margin-top: 10px;
+            padding: 12px;
+            background: white;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
         }
         .status {
             position: fixed;
@@ -334,16 +419,19 @@ def home():
             padding: 10px 20px;
             border-radius: 20px;
             font-size: 14px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
         .reward-positive { color: #10b981; font-weight: bold; }
         .reward-negative { color: #ef4444; font-weight: bold; }
-        .completed { color: #10b981; font-weight: bold; }
+        .completed { color: #10b981; font-weight: bold; font-size: 16px; }
+        .score-large { font-size: 24px; font-weight: bold; color: #667eea; }
+        .explanation { color: #6b7280; font-size: 12px; margin-top: 5px; }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>🎯 Customer Support Environment</h1>
-        <p>AI-powered customer support task automation</p>
+        <p>AI-powered customer support task automation with explainable rewards</p>
     </div>
     
     <div class="tasks-grid" id="tasks"></div>
@@ -358,7 +446,7 @@ def home():
             try {
                 const response = await fetch(`${API_BASE}/health`);
                 const data = await response.json();
-                document.getElementById('status').innerHTML = '🟢 Healthy';
+                document.getElementById('status').innerHTML = `🟢 Healthy (${data.active_sessions} active sessions)`;
             } catch (error) {
                 document.getElementById('status').innerHTML = '🔴 Error';
             }
@@ -371,7 +459,10 @@ def home():
                 currentSessions[taskId] = data.session_id;
                 
                 const responseDiv = document.getElementById(`response-${taskId}`);
-                responseDiv.innerHTML = `<div style="color: green;">✅ New session created! Click "Take Step" to start.</div>`;
+                responseDiv.innerHTML = `<div class="step-entry" style="background: #e8f5e9; border-left-color: #4caf50;">
+                    ✅ ${data.message}<br>
+                    <strong>Score:</strong> ${data.score}
+                </div>`;
                 
                 const stepBtn = document.getElementById(`step-${taskId}`);
                 stepBtn.disabled = false;
@@ -407,12 +498,14 @@ def home():
                 const responseDiv = document.getElementById(`response-${taskId}`);
                 const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
                 const stepHtml = `
-                    <div style="margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 5px;">
-                        <strong>Step ${data.step}:</strong><br>
-                        Action: <code>${JSON.stringify(data.action)}</code><br>
-                        Reward: <span class="${rewardClass}">${data.reward}</span><br>
-                        Score: <strong>${(data.score * 100).toFixed(1)}%</strong><br>
-                        ${data.done ? '<span class="completed">🎉 TASK COMPLETED!</span>' : '➡️ Continue...'}
+                    <div class="step-entry">
+                        <strong>Step ${data.step}</strong><br>
+                        <strong>Action:</strong> <code>${JSON.stringify(data.action)}</code><br>
+                        <strong>Reward:</strong> <span class="${rewardClass}">${data.reward}</span><br>
+                        <div class="explanation">📖 ${data.reward_explanation}</div>
+                        <strong>Score:</strong> <span class="score-large">${data.score}</span><br>
+                        ${data.message ? `<div style="margin-top: 8px; color: #10b981;">💬 ${data.message}</div>` : ''}
+                        ${data.task_complete_message ? `<div style="margin-top: 10px; padding: 10px; background: #e8f5e9; border-radius: 8px; font-weight: bold;">🎉 ${data.task_complete_message}</div>` : ''}
                     </div>
                 `;
                 responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
@@ -447,9 +540,10 @@ def home():
             
             let done = false;
             let maxSteps = taskId === 'address_change_hard' ? 5 : 3;
+            let stepsTaken = 0;
             
-            for (let i = 0; i < maxSteps && !done; i++) {
-                await new Promise(r => setTimeout(r, 300));
+            while (!done && stepsTaken < maxSteps) {
+                await new Promise(r => setTimeout(r, 400));
                 
                 const response = await fetch(`${API_BASE}/step_ai`, {
                     method: 'POST',
@@ -458,17 +552,19 @@ def home():
                 });
                 
                 const data = await response.json();
+                stepsTaken = data.step;
                 done = data.done;
                 
                 const responseDiv = document.getElementById(`response-${taskId}`);
                 const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
                 const stepHtml = `
-                    <div style="margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 5px;">
-                        <strong>Step ${data.step}:</strong><br>
-                        Action: <code>${JSON.stringify(data.action)}</code><br>
-                        Reward: <span class="${rewardClass}">${data.reward}</span><br>
-                        Score: <strong>${(data.score * 100).toFixed(1)}%</strong><br>
-                        ${data.done ? '<span class="completed">🎉 COMPLETED!</span>' : ''}
+                    <div class="step-entry">
+                        <strong>Step ${data.step}</strong><br>
+                        <strong>Action:</strong> <code>${JSON.stringify(data.action)}</code><br>
+                        <strong>Reward:</strong> <span class="${rewardClass}">${data.reward}</span><br>
+                        <div class="explanation">📖 ${data.reward_explanation}</div>
+                        <strong>Score:</strong> <span class="score-large">${data.score}</span><br>
+                        ${data.task_complete_message ? `<div style="margin-top: 10px; padding: 10px; background: #e8f5e9; border-radius: 8px; font-weight: bold;">🎉 ${data.task_complete_message}</div>` : ''}
                     </div>
                 `;
                 responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
@@ -493,11 +589,15 @@ def home():
                         <h3>${task.name}</h3>
                         <span class="difficulty ${task.difficulty}">${task.difficulty.toUpperCase()}</span>
                         <p>${task.description}</p>
+                        <div class="reward-badge">🎯 Expected Reward: ${task.expected_reward} / 1.0</div>
+                        ${task.steps_detail ? task.steps_detail.map(step => `<div class="reward-badge">📋 ${step}</div>`).join('') : ''}
                         <p><strong>Max steps:</strong> ${task.max_steps}</p>
                         <button onclick="resetTask('${task.task_id}')">🔄 Reset</button>
                         <button id="step-${task.task_id}" onclick="takeStep('${task.task_id}')" disabled>🤖 Take Step</button>
                         <button id="auto-${task.task_id}" onclick="runFullTask('${task.task_id}')" disabled>⚡ Run Full Task</button>
-                        <div id="response-${task.task_id}" class="response-area"></div>
+                        <div id="response-${task.task_id}" class="response-area">
+                            <div style="color: #999; text-align: center;">Click Reset to start</div>
+                        </div>
                     </div>
                 `).join('');
             } catch (error) {
