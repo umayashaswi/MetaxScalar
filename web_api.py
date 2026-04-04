@@ -50,12 +50,10 @@ class ResetRequest(BaseModel):
     task_id: str
 
 # =========================
-# TASK-SPECIFIC PROMPTS (for AI inference)
+# TASK-SPECIFIC PROMPTS
 # =========================
 
 def get_task_prompt(task_id: str, step_num: int, history: List) -> str:
-    """Get the system prompt for the AI model"""
-    
     if task_id == "order_status_easy":
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
@@ -89,7 +87,6 @@ def get_task_prompt(task_id: str, step_num: int, history: List) -> str:
         return "Return valid JSON with action_type field."
 
 def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
-    """Fallback action if AI fails"""
     if task_id == "order_status_easy":
         return {"action_type": "lookup_order", "order_id": "12345"}
     
@@ -110,8 +107,6 @@ def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
     return {"action_type": "send_reply", "message": "How can I help you?"}
 
 def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
-    """Call the AI model to get an action (REAL INFERENCE)"""
-    
     if client is None:
         return get_step_default_action(task_id, step_num)
     
@@ -343,7 +338,7 @@ def get_session_summary(session_id: str):
     
     session = sessions[session_id]
     expected_steps = 3 if session["task_id"] == "address_change_hard" else 1
-    efficiency = min(100, int((expected_steps / max(session["steps"], 1)) * 100)) if session["done"] else 0
+    efficiency = min(100, int((expected_steps / max(session["steps"], 1)) * 100)) if session["steps"] > 0 else 0
     score_value = min(max(session["total_reward"], 0.0), 1.0)
     intelligence_score = round(score_value * 10 - (len(session["mistakes"]) * 0.5), 1)
     intelligence_score = max(0, min(10, intelligence_score))
@@ -361,9 +356,8 @@ def get_session_summary(session_id: str):
         "score_value": score_value,
         "intelligence_score": f"{intelligence_score:.1f} / 10",
         "completed": session["done"],
-        "ai_actions": session["ai_actions"],
         "steps_history": [
-            {"step": i+1, "name": session["step_names"][i], "reward": session["rewards"][i], "explanation": session["explanations"][i], "ai_action": session["ai_actions"][i]}
+            {"step": i+1, "name": session["step_names"][i], "reward": session["rewards"][i], "explanation": session["explanations"][i]}
             for i in range(len(session["steps"]))
         ]
     }
@@ -391,7 +385,7 @@ def health():
     return {"status": "healthy", "active_sessions": len(sessions), "ai_model": MODEL_NAME if client else "fallback"}
 
 # =========================
-# HOME UI
+# HOME UI - CLEAN & ORGANIZED
 # =========================
 
 @app.get("/", response_class=HTMLResponse)
@@ -412,59 +406,72 @@ def home():
             padding: 30px;
         }
         .container { max-width: 1400px; margin: 0 auto; }
+        
+        /* Header */
         .header { text-align: center; margin-bottom: 40px; }
-        .header h1 { font-size: 3.5em; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 10px; }
-        .header p { color: rgba(255,255,255,0.7); font-size: 1.2em; }
-        .badge { display: inline-block; background: rgba(102, 126, 234, 0.2); backdrop-filter: blur(10px); padding: 8px 16px; border-radius: 50px; color: #667eea; font-size: 0.85em; margin-top: 15px; }
-        .tasks-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)); gap: 25px; margin-bottom: 30px; }
-        .task-card { background: rgba(255,255,255,0.05); backdrop-filter: blur(10px); border-radius: 24px; padding: 25px; border: 1px solid rgba(255,255,255,0.1); transition: all 0.3s ease; }
-        .task-card:hover { transform: translateY(-5px); background: rgba(255,255,255,0.08); border-color: rgba(102, 126, 234, 0.5); }
-        .task-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
-        .task-title { font-size: 1.5em; font-weight: 600; color: white; }
-        .difficulty { padding: 5px 12px; border-radius: 20px; font-size: 0.75em; font-weight: 600; text-transform: uppercase; }
+        .header h1 { font-size: 3em; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 10px; }
+        .header p { color: rgba(255,255,255,0.7); font-size: 1.1em; }
+        .badge { display: inline-block; background: rgba(102, 126, 234, 0.2); backdrop-filter: blur(10px); padding: 6px 14px; border-radius: 50px; color: #667eea; font-size: 0.8em; margin-top: 12px; }
+        
+        /* Tasks Grid */
+        .tasks-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 25px; margin-bottom: 30px; }
+        
+        /* Task Card */
+        .task-card { background: rgba(255,255,255,0.06); backdrop-filter: blur(10px); border-radius: 20px; padding: 20px; border: 1px solid rgba(255,255,255,0.1); transition: all 0.3s ease; }
+        .task-card:hover { transform: translateY(-3px); background: rgba(255,255,255,0.08); border-color: rgba(102, 126, 234, 0.4); }
+        .task-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+        .task-title { font-size: 1.3em; font-weight: 600; color: white; }
+        .difficulty { padding: 4px 10px; border-radius: 20px; font-size: 0.7em; font-weight: 600; text-transform: uppercase; }
         .easy { background: #10b981; color: white; }
         .medium { background: #f59e0b; color: white; }
         .hard { background: #ef4444; color: white; }
-        .task-desc { color: rgba(255,255,255,0.6); font-size: 0.9em; margin-bottom: 15px; }
-        .reward-badge { background: rgba(16, 185, 129, 0.2); padding: 6px 12px; border-radius: 12px; font-size: 0.8em; color: #10b981; display: inline-block; margin: 5px 5px 5px 0; }
-        .button-group { display: flex; gap: 10px; margin: 20px 0; flex-wrap: wrap; }
-        button { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 10px 20px; border-radius: 12px; cursor: pointer; font-size: 0.85em; font-weight: 500; transition: all 0.2s ease; }
+        .task-desc { color: rgba(255,255,255,0.5); font-size: 0.85em; margin-bottom: 12px; }
+        .reward-badge { background: rgba(16, 185, 129, 0.15); padding: 4px 10px; border-radius: 10px; font-size: 0.75em; color: #10b981; display: inline-block; margin: 3px 3px 3px 0; }
+        
+        /* Buttons */
+        .button-group { display: flex; gap: 10px; margin: 15px 0; flex-wrap: wrap; }
+        button { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 8px 18px; border-radius: 10px; cursor: pointer; font-size: 0.8em; font-weight: 500; transition: all 0.2s ease; }
         button:hover { transform: scale(1.02); opacity: 0.9; }
         button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
         .reset-btn { background: linear-gradient(135deg, #f59e0b, #d97706); }
         .auto-btn { background: linear-gradient(135deg, #10b981, #059669); }
-        .response-area { background: rgba(0,0,0,0.3); border-radius: 16px; padding: 15px; margin-top: 15px; max-height: 500px; overflow-y: auto; }
-        .visual-steps { margin-bottom: 20px; }
-        .step-item { display: flex; align-items: center; gap: 12px; padding: 10px; margin: 8px 0; background: rgba(255,255,255,0.05); border-radius: 12px; }
-        .step-icon { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.1em; }
+        
+        /* Response Area */
+        .response-area { background: rgba(0,0,0,0.3); border-radius: 14px; padding: 12px; margin-top: 12px; max-height: 450px; overflow-y: auto; }
+        
+        /* Performance Summary Card */
+        .perf-summary { background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(102, 126, 234, 0.12)); border-radius: 14px; padding: 14px; margin-bottom: 15px; border: 1px solid rgba(16, 185, 129, 0.25); }
+        .perf-title { font-size: 0.75em; text-transform: uppercase; letter-spacing: 1px; color: rgba(255,255,255,0.5); margin-bottom: 10px; }
+        .perf-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; text-align: center; }
+        .perf-value { font-size: 1.2em; font-weight: 700; color: white; }
+        .perf-label { font-size: 0.65em; color: rgba(255,255,255,0.5); }
+        .progress-bar-container { background: rgba(255,255,255,0.1); border-radius: 20px; height: 6px; margin: 10px 0; overflow: hidden; }
+        .progress-fill { background: linear-gradient(90deg, #10b981, #667eea); height: 100%; border-radius: 20px; transition: width 0.3s ease; width: 0%; }
+        .intel-score { text-align: center; margin-top: 10px; padding: 8px; background: rgba(102, 126, 234, 0.2); border-radius: 10px; }
+        .intel-value { font-size: 1.3em; font-weight: 700; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        
+        /* Step Item */
+        .step-item { display: flex; align-items: center; gap: 10px; padding: 8px; margin: 6px 0; background: rgba(255,255,255,0.04); border-radius: 10px; }
+        .step-icon { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.9em; }
         .step-icon.success { background: rgba(16, 185, 129, 0.2); color: #10b981; }
         .step-icon.failed { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
         .step-content { flex: 1; }
-        .step-name { color: white; font-weight: 500; font-size: 0.9em; }
-        .step-detail { font-size: 0.75em; color: rgba(255,255,255,0.5); margin-top: 4px; }
-        .step-reward { font-size: 0.8em; font-weight: 600; }
+        .step-name { color: white; font-weight: 500; font-size: 0.85em; }
+        .step-detail { font-size: 0.7em; color: rgba(255,255,255,0.45); margin-top: 2px; }
+        .step-reward { font-size: 0.75em; font-weight: 600; }
         .step-reward.positive { color: #10b981; }
         .step-reward.negative { color: #ef4444; }
-        .performance-summary { background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(102, 126, 234, 0.1)); border-radius: 16px; padding: 15px; margin-bottom: 15px; border: 1px solid rgba(16, 185, 129, 0.3); }
-        .summary-title { font-size: 0.85em; text-transform: uppercase; letter-spacing: 1px; color: rgba(255,255,255,0.5); margin-bottom: 12px; }
-        .summary-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
-        .summary-item { text-align: center; }
-        .summary-value { font-size: 1.5em; font-weight: 700; color: white; }
-        .summary-label { font-size: 0.7em; color: rgba(255,255,255,0.5); }
-        .progress-container { background: rgba(255,255,255,0.1); border-radius: 20px; height: 8px; margin: 10px 0; overflow: hidden; }
-        .progress-bar { background: linear-gradient(90deg, #10b981, #667eea); height: 100%; border-radius: 20px; transition: width 0.3s ease; width: 0%; }
-        .intelligence-score { text-align: center; margin-top: 10px; padding: 10px; background: rgba(102, 126, 234, 0.2); border-radius: 12px; }
-        .intelligence-value { font-size: 1.8em; font-weight: 700; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .status { position: fixed; bottom: 20px; right: 20px; background: rgba(0,0,0,0.7); backdrop-filter: blur(10px); padding: 10px 20px; border-radius: 50px; font-size: 0.85em; color: #10b981; }
-        .empty-state { text-align: center; color: rgba(255,255,255,0.4); padding: 30px; }
+        
+        .empty-state { text-align: center; color: rgba(255,255,255,0.35); padding: 25px; font-size: 0.85em; }
+        .status { position: fixed; bottom: 15px; right: 15px; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); padding: 6px 14px; border-radius: 30px; font-size: 0.75em; color: #10b981; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🎯 Customer Support Environment</h1>
-            <p>AI Agent Training Platform | Explainable Rewards | Real-time Performance Analytics</p>
-            <div class="badge">🚀 RL Environment | OpenEnv Compliant | Real LLaMA 3.1 Inference</div>
+            <p>AI Agent Training | Explainable Rewards | Real-time Performance Analytics</p>
+            <div class="badge">🚀 OpenEnv Compliant | Real LLaMA 3.1 Inference</div>
         </div>
         <div class="tasks-grid" id="tasks"></div>
         <div class="status" id="status">🟢 System Online</div>
@@ -476,107 +483,120 @@ def home():
         
         async function checkHealth() {
             try {
-                const response = await fetch(`${API_BASE}/health`);
-                const data = await response.json();
-                document.getElementById('status').innerHTML = `🟢 System Online | ${data.active_sessions} Active Sessions | 🤖 ${data.ai_model || 'LLaMA'}`;
-            } catch (error) {
-                document.getElementById('status').innerHTML = '🔴 System Offline';
-            }
+                const res = await fetch(`${API_BASE}/health`);
+                const data = await res.json();
+                document.getElementById('status').innerHTML = `🟢 Online | ${data.active_sessions} Sessions | 🤖 ${data.ai_model || 'LLaMA'}`;
+            } catch(e) { document.getElementById('status').innerHTML = '🔴 Offline'; }
         }
         
         async function fetchSummary(sessionId, taskId) {
             try {
-                const response = await fetch(`${API_BASE}/session/${sessionId}/summary`);
-                const data = await response.json();
+                const res = await fetch(`${API_BASE}/session/${sessionId}/summary`);
+                const data = await res.json();
                 sessionSummaries[taskId] = data;
                 return data;
-            } catch (error) {
-                return null;
-            }
+            } catch(e) { return null; }
         }
         
-        function renderVisualSteps(steps) {
-            if (!steps || steps.length === 0) return '<div class="empty-state">🤖 Click "Take Step" to start AI inference</div>';
-            return `<div class="visual-steps">${steps.map(step => `<div class="step-item"><div class="step-icon ${step.reward >= 0 ? 'success' : 'failed'}">${step.reward >= 0 ? '✓' : '✗'}</div><div class="step-content"><div class="step-name">${step.name}</div><div class="step-detail">${step.explanation}</div></div><div class="step-reward ${step.reward >= 0 ? 'positive' : 'negative'}">${step.reward >= 0 ? '+' : ''}${step.reward}</div></div>`).reverse().join('')}</div>`;
-        }
-        
-        function renderPerformanceSummary(summary) {
+        function renderPerfSummary(summary) {
             if (!summary || summary.steps_taken === 0) return '';
-            const progressPercent = (summary.score_value * 100);
-            return `<div class="performance-summary"><div class="summary-title">📊 Agent Performance Analysis</div><div class="summary-grid"><div class="summary-item"><div class="summary-value">${summary.steps_taken} / ${summary.expected_steps}</div><div class="summary-label">Steps Taken</div></div><div class="summary-item"><div class="summary-value">${summary.efficiency}%</div><div class="summary-label">Efficiency</div></div><div class="summary-item"><div class="summary-value">${summary.mistakes}</div><div class="summary-label">Mistakes</div></div><div class="summary-item"><div class="summary-value">${summary.score}</div><div class="summary-label">Final Score</div></div></div><div class="progress-container"><div class="progress-bar" style="width: ${progressPercent}%"></div></div><div class="intelligence-score"><div class="summary-label">🤖 Agent Intelligence Score</div><div class="intelligence-value">${summary.intelligence_score}</div></div></div>`;
+            const progress = summary.score_value * 100;
+            return `<div class="perf-summary">
+                <div class="perf-title">📊 PERFORMANCE SUMMARY</div>
+                <div class="perf-grid">
+                    <div><div class="perf-value">${summary.steps_taken}/${summary.expected_steps}</div><div class="perf-label">STEPS</div></div>
+                    <div><div class="perf-value">${summary.efficiency}%</div><div class="perf-label">EFFICIENCY</div></div>
+                    <div><div class="perf-value">${summary.mistakes}</div><div class="perf-label">MISTAKES</div></div>
+                    <div><div class="perf-value">${summary.score}</div><div class="perf-label">SCORE</div></div>
+                </div>
+                <div class="progress-bar-container"><div class="progress-fill" style="width: ${progress}%"></div></div>
+                <div class="intel-score"><div class="perf-label">🤖 AGENT INTELLIGENCE SCORE</div><div class="intel-value">${summary.intelligence_score}</div></div>
+            </div>`;
+        }
+        
+        function renderSteps(steps) {
+            if (!steps || steps.length === 0) return '<div class="empty-state">🤖 Click "Take Step" to start AI inference</div>';
+            return steps.map(s => `<div class="step-item">
+                <div class="step-icon ${s.reward >= 0 ? 'success' : 'failed'}">${s.reward >= 0 ? '✓' : '✗'}</div>
+                <div class="step-content"><div class="step-name">${s.name}</div><div class="step-detail">${s.explanation}</div></div>
+                <div class="step-reward ${s.reward >= 0 ? 'positive' : 'negative'}">${s.reward >= 0 ? '+' : ''}${s.reward}</div>
+            </div>`).reverse().join('');
         }
         
         async function resetTask(taskId) {
             try {
-                const response = await fetch(`${API_BASE}/reset/${taskId}`);
-                const data = await response.json();
+                const res = await fetch(`${API_BASE}/reset/${taskId}`);
+                const data = await res.json();
                 currentSessions[taskId] = data.session_id;
                 delete sessionSummaries[taskId];
-                const responseDiv = document.getElementById(`response-${taskId}`);
-                responseDiv.innerHTML = `<div class="visual-steps"><div class="empty-state">🔄 Environment reset. AI agent ready.</div></div>`;
+                document.getElementById(`response-${taskId}`).innerHTML = '<div class="empty-state">🔄 Environment reset. AI agent ready.</div>';
                 const stepBtn = document.getElementById(`step-${taskId}`);
                 stepBtn.disabled = false;
                 stepBtn.textContent = '🤖 Take Step';
                 const autoBtn = document.getElementById(`auto-${taskId}`);
                 if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = '⚡ Run Full Episode'; }
-            } catch (error) { alert('Error resetting task: ' + error.message); }
+            } catch(e) { alert('Reset error: ' + e.message); }
         }
         
         async function takeStep(taskId) {
-            if (!currentSessions[taskId]) { alert('Please reset the task first!'); return; }
+            if (!currentSessions[taskId]) { alert('Please reset first!'); return; }
             const stepBtn = document.getElementById(`step-${taskId}`);
             stepBtn.disabled = true;
-            stepBtn.textContent = '⏳ AI Thinking...';
+            stepBtn.textContent = '⏳ Thinking...';
             try {
-                const response = await fetch(`${API_BASE}/step_ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: currentSessions[taskId] }) });
-                const data = await response.json();
+                await fetch(`${API_BASE}/step_ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: currentSessions[taskId] }) });
                 const summary = await fetchSummary(currentSessions[taskId], taskId);
-                const responseDiv = document.getElementById(`response-${taskId}`);
-                if (summary) { responseDiv.innerHTML = renderPerformanceSummary(summary) + renderVisualSteps(summary.steps_history); }
-                if (data.done) {
+                const div = document.getElementById(`response-${taskId}`);
+                if (summary) div.innerHTML = renderPerfSummary(summary) + renderSteps(summary.steps_history);
+                if (summary?.completed) {
                     stepBtn.disabled = true;
-                    stepBtn.textContent = '✅ Episode Complete';
+                    stepBtn.textContent = '✅ Complete';
                     const autoBtn = document.getElementById(`auto-${taskId}`);
                     if (autoBtn) autoBtn.disabled = true;
                 } else {
                     stepBtn.disabled = false;
-                    stepBtn.textContent = '🤖 Take Next Step';
+                    stepBtn.textContent = '🤖 Next Step';
                 }
-            } catch (error) { alert('Error: ' + error.message); stepBtn.disabled = false; stepBtn.textContent = '🤖 Retry Step'; }
+            } catch(e) { alert('Step error: ' + e.message); stepBtn.disabled = false; stepBtn.textContent = '🤖 Retry'; }
         }
         
         async function runFullTask(taskId) {
-            if (!currentSessions[taskId]) { await resetTask(taskId); await new Promise(r => setTimeout(r, 500)); }
+            if (!currentSessions[taskId]) { await resetTask(taskId); await new Promise(r => setTimeout(r, 400)); }
             const stepBtn = document.getElementById(`step-${taskId}`);
             const autoBtn = document.getElementById(`auto-${taskId}`);
             autoBtn.disabled = true;
-            autoBtn.textContent = '🏃 AI Running Episode...';
+            autoBtn.textContent = '🏃 Running...';
             stepBtn.disabled = true;
-            let done = false;
-            let maxSteps = taskId === 'address_change_hard' ? 5 : 3;
-            let stepsTaken = 0;
-            while (!done && stepsTaken < maxSteps) {
-                await new Promise(r => setTimeout(r, 500));
-                const response = await fetch(`${API_BASE}/step_ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: currentSessions[taskId] }) });
-                const data = await response.json();
-                stepsTaken = data.step;
-                done = data.done;
+            let done = false, maxSteps = taskId === 'address_change_hard' ? 5 : 3, iter = 0;
+            while (!done && iter < maxSteps) {
+                await new Promise(r => setTimeout(r, 450));
+                await fetch(`${API_BASE}/step_ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: currentSessions[taskId] }) });
                 const summary = await fetchSummary(currentSessions[taskId], taskId);
-                const responseDiv = document.getElementById(`response-${taskId}`);
-                if (summary) { responseDiv.innerHTML = renderPerformanceSummary(summary) + renderVisualSteps(summary.steps_history); }
+                const div = document.getElementById(`response-${taskId}`);
+                if (summary) div.innerHTML = renderPerfSummary(summary) + renderSteps(summary.steps_history);
+                done = summary?.completed || false;
+                iter++;
             }
             autoBtn.disabled = true;
-            autoBtn.textContent = '✅ Episode Complete';
+            autoBtn.textContent = '✅ Complete';
             if (!done) stepBtn.disabled = false;
         }
         
         async function loadTasks() {
             try {
-                const response = await fetch(`${API_BASE}/tasks`);
-                const data = await response.json();
-                const tasksGrid = document.getElementById('tasks');
-                tasksGrid.innerHTML = data.tasks.map(task => `<div class="task-card"><div class="task-header"><span class="task-title">${task.icon || '🎯'} ${task.name}</span><span class="difficulty ${task.difficulty}">${task.difficulty.toUpperCase()}</span></div><div class="task-desc">${task.description}</div><div class="reward-badge">🎯 Expected Reward: ${task.expected_reward} / 1.0</div>${task.steps_detail ? task.steps_detail.map(step => `<div class="reward-badge">📋 ${step}</div>`).join('') : ''}<div class="reward-badge">⚡ Max Steps: ${task.max_steps}</div><div class="button-group"><button class="reset-btn" onclick="resetTask('${task.task_id}')">🔄 Reset Environment</button><button id="step-${task.task_id}" onclick="takeStep('${task.task_id}')" disabled>🤖 Take Step</button><button id="auto-${task.task_id}" class="auto-btn" onclick="runFullTask('${task.task_id}')" disabled>⚡ Run Full Episode</button></div><div id="response-${task.task_id}" class="response-area"><div class="empty-state">🔄 Click "Reset Environment" to start AI training</div></div></div>`).join('');
-            } catch (error) { console.error('Error loading tasks:', error); }
+                const res = await fetch(`${API_BASE}/tasks`);
+                const data = await res.json();
+                const grid = document.getElementById('tasks');
+                grid.innerHTML = data.tasks.map(t => `<div class="task-card">
+                    <div class="task-header"><span class="task-title">${t.icon} ${t.name}</span><span class="difficulty ${t.difficulty}">${t.difficulty.toUpperCase()}</span></div>
+                    <div class="task-desc">${t.description}</div>
+                    <div class="reward-badge">🎯 Expected Reward: ${t.expected_reward} / 1.0</div>
+                    ${t.steps_detail ? t.steps_detail.map(s => `<div class="reward-badge">📋 ${s}</div>`).join('') : ''}
+                    <div class="reward-badge">⚡ Max Steps: ${t.max_steps}</div>
+                    <div class="button-group"><button class="reset-btn" onclick="resetTask('${t.task_id}')">🔄 Reset</button><button id="step-${t.task_id}" onclick="takeStep('${t.task_id}')" disabled>🤖 Take Step</button><button id="auto-${t.task_id}" class="auto-btn" onclick="runFullTask('${t.task_id}')" disabled>⚡ Run Full Episode</button></div>
+                    <div id="response-${t.task_id}" class="response-area"><div class="empty-state">🔄 Click "Reset" to start</div></div>
+                </div>`).join('');
+            } catch(e) { console.error(e); }
         }
         
         checkHealth();
