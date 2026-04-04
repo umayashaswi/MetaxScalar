@@ -1,12 +1,12 @@
 """
 Web API for Customer Support Environment
-Provides REST endpoints for HF Spaces deployment
+Provides REST endpoints and web interface for HF Spaces deployment
 """
 
 import asyncio
 import json
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
@@ -23,8 +23,33 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Mount static files (create 'static' folder with index.html)
-# Check if static directory exists before mounting
+# Serve web interface at root
+@app.get("/", response_class=HTMLResponse)
+async def serve_ui():
+    """Serve the web interface"""
+    index_path = os.path.join("static", "index.html")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as f:
+            return f.read()
+    else:
+        # Fallback to JSON response if HTML not found
+        return JSONResponse(content={
+            "service": "Customer Support Environment",
+            "version": "1.0.0",
+            "status": "running",
+            "endpoints": {
+                "/": "Web interface (if static/index.html exists) or this info",
+                "/health": "Health check",
+                "/tasks": "List available tasks",
+                "/reset/{task_id}": "Reset environment for a task",
+                "/step": "Take an action in the environment",
+                "/score/{session_id}": "Get current score for a session",
+                "/docs": "Interactive API documentation",
+                "/ui": "Static files mount"
+            }
+        })
+
+# Mount static files
 static_dir = "static"
 if os.path.exists(static_dir) and os.path.isdir(static_dir):
     app.mount("/ui", StaticFiles(directory=static_dir, html=True), name="ui")
@@ -56,24 +81,6 @@ class TaskInfo(BaseModel):
     description: str
     difficulty: str
     max_steps: int
-
-@app.get("/")
-async def root():
-    """Root endpoint with API information"""
-    return {
-        "service": "Customer Support Environment",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": {
-            "/": "This info",
-            "/health": "Health check",
-            "/tasks": "List available tasks",
-            "/reset/{task_id}": "Reset environment for a task",
-            "/step": "Take an action in the environment",
-            "/score/{session_id}": "Get current score for a session",
-            "/docs": "Interactive API documentation"
-        }
-    }
 
 @app.get("/health")
 async def health_check():
