@@ -48,7 +48,7 @@ sessions: Dict[str, Dict] = {}
 
 class StepRequest(BaseModel):
     session_id: str
-    use_expert: bool = False  # New: ask expert flag
+    use_expert: bool = False
 
 class ResetRequest(BaseModel):
     task_id: str
@@ -62,13 +62,15 @@ REWARD_CONFIG = {
         "correct_step": 0.8,
         "wrong_action": -0.3,
         "ask_expert_penalty": -0.2,
-        "expert_hint": "Use lookup_order with order_id 12345"
+        "max_score": 0.8,
+        "expert_hint": "Try using lookup_order with order_id 12345"
     },
     "refund_policy_medium": {
         "correct_step": 0.8,
         "wrong_action": -0.3,
         "ask_expert_penalty": -0.2,
-        "expert_hint": "Send a reply explaining the refund policy (must include 'refund')"
+        "max_score": 0.8,
+        "expert_hint": "Send a reply that explains the refund policy (include the word 'refund')"
     },
     "address_change_hard": {
         "step1_correct": 0.4,
@@ -76,6 +78,7 @@ REWARD_CONFIG = {
         "step3_correct": 0.3,
         "wrong_action": -0.3,
         "ask_expert_penalty": -0.2,
+        "max_score": 1.0,
         "expert_hint": {
             1: "Step 1: Use lookup_order with order_id 12345",
             2: "Step 2: Ask customer for their new address",
@@ -85,22 +88,24 @@ REWARD_CONFIG = {
 }
 
 # =========================
-# TASK-SPECIFIC PROMPTS
+# TASK-SPECIFIC PROMPTS (NATURAL, NO HARDCODED ANSWERS)
 # =========================
 
 def get_task_prompt(task_id: str, step_num: int, history: List, use_expert: bool = False) -> str:
     expert_suffix = ""
     if use_expert:
-        expert_suffix = f"\n\n⚠️ EXPERT ADVICE: {REWARD_CONFIG[task_id]['expert_hint'] if task_id != 'address_change_hard' else REWARD_CONFIG[task_id]['expert_hint'].get(step_num, 'Follow the correct sequence')}"
+        if task_id == "address_change_hard":
+            hint = REWARD_CONFIG[task_id]["expert_hint"].get(step_num, "Follow the correct sequence")
+        else:
+            hint = REWARD_CONFIG[task_id]["expert_hint"]
+        expert_suffix = f"\n\n🎓 EXPERT ADVICE: {hint}"
     
     if task_id == "order_status_easy":
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
             "The customer wants to check their order status.\n\n"
-            "You MUST respond with:\n"
-            '{"action_type": "lookup_order", "order_id": "12345"}\n\n'
-            "DO NOT use 'order_status_easy' as action_type.\n"
-            "DO NOT send reply messages.\n\n"
+            "Choose the appropriate action to help the customer.\n"
+            "Return a JSON object with 'action_type' and necessary parameters.\n\n"
             f"Return ONLY the JSON.{expert_suffix}"
         )
     
@@ -108,29 +113,25 @@ def get_task_prompt(task_id: str, step_num: int, history: List, use_expert: bool
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
             "The customer wants to know the refund policy.\n\n"
-            "You MUST respond with:\n"
-            '{"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}\n\n'
-            "Your message MUST include the word 'refund'.\n\n"
+            "Choose the appropriate action to help the customer.\n"
+            "Your response should explain the refund policy.\n\n"
             f"Return ONLY the JSON.{expert_suffix}"
         )
     
     elif task_id == "address_change_hard":
         step_hint = ""
         if step_num == 1:
-            step_hint = "STEP 1: Lookup the order first."
+            step_hint = "The customer wants to change their address. Start by locating the order."
         elif step_num == 2:
-            step_hint = "STEP 2: Ask the customer for their new address."
+            step_hint = "Now ask the customer for their new address."
         elif step_num == 3:
-            step_hint = "STEP 3: Ask the customer to confirm the new address."
+            step_hint = "Ask the customer to confirm the new address to complete the change."
         
         return (
             "You are a Customer Support AI handling address changes.\n"
             "Return ONLY valid JSON.\n\n"
             f"{step_hint}\n\n"
-            "Follow this EXACT sequence:\n"
-            "STEP 1: {\"action_type\": \"lookup_order\", \"order_id\": \"12345\"}\n"
-            "STEP 2: {\"action_type\": \"send_reply\", \"message\": \"Please provide your new address.\"}\n"
-            "STEP 3: {\"action_type\": \"send_reply\", \"message\": \"Please confirm your new address.\"}\n\n"
+            "Choose the appropriate action based on the current step.\n\n"
             f"Return ONLY the JSON for the current step.{expert_suffix}"
         )
     
@@ -205,9 +206,6 @@ def call_ai_model(task_id: str, step_num: int, history: List, use_expert: bool =
             return get_step_default_action(task_id, step_num)
         
         # Fix common issues
-        if data["action_type"] == task_id:
-            return get_step_default_action(task_id, step_num)
-        
         if data["action_type"] == "lookup_order" and "order_id" not in data:
             data["order_id"] = "12345"
         
@@ -222,54 +220,57 @@ def call_ai_model(task_id: str, step_num: int, history: List, use_expert: bool =
 # =========================
 
 def validate_action(task_id: str, step: int, action_dict: Dict, used_expert: bool = False) -> tuple:
-    """Validate action and return (is_valid, reward, explanation, expected_action)"""
+    """Validate action and return (is_valid, reward, explanation, expected_action, is_perfect)"""
     
     action_type = action_dict.get("action_type", "")
     config = REWARD_CONFIG[task_id]
-    
-    # Apply expert penalty if used
-    expert_penalty = -0.2 if used_expert else 0
+    expert_penalty = config["ask_expert_penalty"] if used_expert else 0
     
     if task_id == "order_status_easy":
         if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
             reward = config["correct_step"] + expert_penalty
-            return True, max(0, reward), "✅ Correct: Order lookup successful", "lookup_order"
+            is_perfect = not used_expert
+            return True, max(0, reward), "✅ Correct: Order lookup successful", "lookup_order", is_perfect
         else:
-            return False, config["wrong_action"], f"❌ Wrong: Got '{action_type}', expected 'lookup_order'", "lookup_order"
+            return False, config["wrong_action"], f"❌ Wrong: Got '{action_type}', expected 'lookup_order'", "lookup_order", False
     
     if task_id == "refund_policy_medium":
         if action_type == "send_reply" and "refund" in action_dict.get("message", "").lower():
             reward = config["correct_step"] + expert_penalty
-            return True, max(0, reward), "✅ Correct: Refund policy explained", "send_reply with 'refund'"
+            is_perfect = not used_expert
+            return True, max(0, reward), "✅ Correct: Refund policy explained", "send_reply with 'refund'", is_perfect
         else:
-            return False, config["wrong_action"], "❌ Wrong: Must send reply with 'refund'", "send_reply with 'refund'"
+            return False, config["wrong_action"], "❌ Wrong: Must send reply with 'refund'", "send_reply with 'refund'", False
     
     if task_id == "address_change_hard":
         if step == 1:
             if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
                 reward = config["step1_correct"] + expert_penalty
-                return True, max(0, reward), "✅ Step 1/3: Order located", "lookup_order"
+                is_perfect = not used_expert
+                return True, max(0, reward), "✅ Step 1/3: Order located", "lookup_order", is_perfect
             else:
-                return False, config["wrong_action"], f"❌ Step 1: Got '{action_type}', expected 'lookup_order'", "lookup_order"
+                return False, config["wrong_action"], f"❌ Step 1: Got '{action_type}', expected 'lookup_order'", "lookup_order", False
         
         elif step == 2:
             if action_type == "send_reply" and "address" in action_dict.get("message", "").lower():
                 reward = config["step2_correct"] + expert_penalty
-                return True, max(0, reward), "✅ Step 2/3: Address requested", "send_reply asking for address"
+                is_perfect = not used_expert
+                return True, max(0, reward), "✅ Step 2/3: Address requested", "send_reply asking for address", is_perfect
             else:
-                return False, config["wrong_action"], "❌ Step 2: Must ask for new address", "send_reply asking for address"
+                return False, config["wrong_action"], "❌ Step 2: Must ask for new address", "send_reply asking for address", False
         
         elif step == 3:
             if action_type == "send_reply" and "confirm" in action_dict.get("message", "").lower():
                 reward = config["step3_correct"] + expert_penalty
-                return True, max(0, reward), "✅ Step 3/3: Address confirmed - Complete!", "send_reply asking for confirmation"
+                is_perfect = not used_expert
+                return True, max(0, reward), "✅ Step 3/3: Address confirmed", "send_reply asking for confirmation", is_perfect
             else:
-                return False, config["wrong_action"], "❌ Step 3: Must ask for confirmation", "send_reply asking for confirmation"
+                return False, config["wrong_action"], "❌ Step 3: Must ask for confirmation", "send_reply asking for confirmation", False
     
-    return False, -0.3, "❌ Invalid action format", "valid JSON"
+    return False, -0.3, "❌ Invalid action format", "valid JSON", False
 
 # =========================
-# RESET
+# RESET - COMPLETE STATE RESET
 # =========================
 
 @app.post("/reset")
@@ -278,6 +279,9 @@ def reset(req: ResetRequest):
     env = CustomerSupportEnv(task_id)
     env.reset()
     session_id = str(uuid.uuid4())
+    
+    config = REWARD_CONFIG[task_id]
+    max_score = config["max_score"]
     
     sessions[session_id] = {
         "env": env,
@@ -288,6 +292,7 @@ def reset(req: ResetRequest):
         "actions_taken": [],
         "expert_used_count": 0,
         "done": False,
+        "perfect_completion": False,
         "total_reward": 0.0,
         "history": [],
         "start_time": datetime.now().isoformat()
@@ -299,7 +304,9 @@ def reset(req: ResetRequest):
         "message": f"Environment reset successfully",
         "steps": 0,
         "done": False,
-        "score": "0.00 / 1.0"
+        "score": 0.0,
+        "max_score": max_score,
+        "score_display": f"0.00 / {max_score}"
     }
 
 @app.get("/reset/{task_id}")
@@ -308,7 +315,7 @@ def reset_get(task_id: str):
     return reset(req)
 
 # =========================
-# STEP AI - WITH EXPERT FEATURE
+# STEP AI - WITH PROPER COMPLETION LOGIC
 # =========================
 
 @app.post("/step_ai")
@@ -317,14 +324,30 @@ def step_ai(req: StepRequest):
         raise HTTPException(404, "Invalid session_id. Please reset first.")
 
     session = sessions[req.session_id]
+    config = REWARD_CONFIG[session["task_id"]]
+    max_score = config["max_score"]
 
     if session["done"]:
-        return {
-            "message": "Task already completed. Please reset.",
-            "done": True,
-            "score": f"{session['total_reward']:.2f} / 1.0",
-            "step": session["steps"]
-        }
+        if session["perfect_completion"]:
+            return {
+                "message": "✅ Task already completed perfectly! Great job! Reset to start new.",
+                "done": True,
+                "perfect": True,
+                "score": session["total_reward"],
+                "max_score": max_score,
+                "score_display": f"{session['total_reward']:.2f} / {max_score}",
+                "step": session["steps"]
+            }
+        else:
+            return {
+                "message": f"⚠️ Task already completed but with penalties (score: {session['total_reward']:.2f}/{max_score}). Reset to try for perfect score.",
+                "done": True,
+                "perfect": False,
+                "score": session["total_reward"],
+                "max_score": max_score,
+                "score_display": f"{session['total_reward']:.2f} / {max_score}",
+                "step": session["steps"]
+            }
 
     env = session["env"]
     step_num = session["steps"] + 1
@@ -339,8 +362,8 @@ def step_ai(req: StepRequest):
         ai_action = get_step_default_action(session["task_id"], step_num)
         action = Action(**ai_action)
     
-    # Validate AI's action with expert penalty if applicable
-    is_valid, reward_value, explanation, expected = validate_action(
+    # Validate AI's action
+    is_valid, reward_value, explanation, expected, is_perfect_step = validate_action(
         session["task_id"], step_num, ai_action, used_expert
     )
     
@@ -353,29 +376,53 @@ def step_ai(req: StepRequest):
     session["explanations"].append(explanation)
     session["actions_taken"].append(ai_action)
     session["total_reward"] += reward_value
-    session["done"] = done
     session["history"].append(ai_action)
     
     if used_expert:
         session["expert_used_count"] += 1
-
-    score_value = min(max(session["total_reward"], 0.0), 1.0)
+    
+    # Determine if task is complete and if it's perfect
+    all_steps_complete = False
+    perfect_completion = False
+    
+    if session["task_id"] == "address_change_hard":
+        all_steps_complete = session["steps"] >= 3
+    else:
+        all_steps_complete = session["steps"] >= 1
+    
+    if all_steps_complete:
+        session["done"] = True
+        # Perfect completion: no expert used AND total reward equals max_score
+        perfect_completion = (session["expert_used_count"] == 0 and abs(session["total_reward"] - max_score) < 0.01)
+        session["perfect_completion"] = perfect_completion
+    
+    score_value = min(max(session["total_reward"], 0.0), max_score)
+    
+    # Generate completion message
+    completion_message = None
+    if session["done"]:
+        if perfect_completion:
+            completion_message = "🎉 PERFECT COMPLETION! No expert used, optimal score achieved!"
+        else:
+            completion_message = f"⚠️ Completed with penalties (expert used: {session['expert_used_count']} times, score reduced to {score_value:.2f}/{max_score})"
     
     return {
         "step": session["steps"],
         "action": ai_action,
         "reward": round(reward_value, 2),
         "reward_explanation": explanation,
-        "done": done,
-        "score": f"{score_value:.2f} / 1.0",
-        "score_value": score_value,
+        "done": session["done"],
+        "perfect_completion": session.get("perfect_completion", False),
+        "score": score_value,
+        "max_score": max_score,
+        "score_display": f"{score_value:.2f} / {max_score}",
         "total_reward": session["total_reward"],
         "is_valid": is_valid,
         "used_expert": used_expert,
         "expert_penalty": -0.2 if used_expert else 0,
         "expert_used_count": session["expert_used_count"],
         "expected_action": expected if not is_valid else None,
-        "message": "🎉 Task completed!" if done else None
+        "completion_message": completion_message
     }
 
 
@@ -385,7 +432,9 @@ def get_session(session_id: str):
         raise HTTPException(404, "Session not found")
     
     session = sessions[session_id]
-    score_value = min(max(session["total_reward"], 0.0), 1.0)
+    config = REWARD_CONFIG[session["task_id"]]
+    max_score = config["max_score"]
+    score_value = min(max(session["total_reward"], 0.0), max_score)
     
     return {
         "session_id": session_id,
@@ -396,8 +445,11 @@ def get_session(session_id: str):
         "actions_taken": session["actions_taken"],
         "expert_used_count": session["expert_used_count"],
         "total_reward": session["total_reward"],
-        "score": f"{score_value:.2f} / 1.0",
-        "done": session["done"]
+        "score": score_value,
+        "max_score": max_score,
+        "score_display": f"{score_value:.2f} / {max_score}",
+        "done": session["done"],
+        "perfect_completion": session.get("perfect_completion", False)
     }
 
 
@@ -409,9 +461,9 @@ def get_session(session_id: str):
 def tasks():
     return {
         "tasks": [
-            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Look up order status", "difficulty": "easy", "max_steps": 3, "expected_reward": 0.8},
-            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Explain refund policy", "difficulty": "medium", "max_steps": 3, "expected_reward": 0.8},
-            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Handle address change in 3 steps", "difficulty": "hard", "max_steps": 5, "expected_reward": 1.0}
+            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Look up order status", "difficulty": "easy", "max_steps": 3, "max_score": 0.8},
+            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Explain refund policy", "difficulty": "medium", "max_steps": 3, "max_score": 0.8},
+            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Handle address change in 3 steps", "difficulty": "hard", "max_steps": 5, "max_score": 1.0}
         ]
     }
 
@@ -422,7 +474,7 @@ def health():
 
 
 # =========================
-# UI - CLEAN UNDERSTANDABLE INTERFACE
+# UI - COMPLETE WITH ALL FIXES
 # =========================
 
 @app.get("/", response_class=HTMLResponse)
@@ -442,15 +494,12 @@ def home():
         }
         .container { max-width: 1400px; margin: 0 auto; }
         
-        /* Header */
         .header { text-align: center; color: white; margin-bottom: 30px; }
         .header h1 { font-size: 2.5em; margin-bottom: 10px; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .header p { opacity: 0.8; }
         
-        /* Tasks Grid */
         .tasks-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)); gap: 20px; }
         
-        /* Task Card */
         .task-card {
             background: rgba(255,255,255,0.1);
             backdrop-filter: blur(10px);
@@ -460,46 +509,20 @@ def home():
         }
         .task-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
         .task-header h3 { color: white; font-size: 1.3em; }
-        .difficulty {
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 11px;
-            font-weight: bold;
-        }
+        .difficulty { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; }
         .easy { background: #10b981; }
         .medium { background: #f59e0b; }
         .hard { background: #ef4444; }
         .task-desc { color: rgba(255,255,255,0.7); font-size: 13px; margin-bottom: 15px; }
         
-        /* Progress Bar */
         .progress-section { margin: 15px 0; }
         .progress-label { display: flex; justify-content: space-between; color: rgba(255,255,255,0.7); font-size: 12px; margin-bottom: 5px; }
-        .progress-bar-container {
-            background: rgba(255,255,255,0.2);
-            border-radius: 10px;
-            height: 8px;
-            overflow: hidden;
-        }
-        .progress-fill {
-            background: linear-gradient(90deg, #10b981, #667eea);
-            height: 100%;
-            border-radius: 10px;
-            transition: width 0.3s ease;
-            width: 0%;
-        }
+        .progress-bar-container { background: rgba(255,255,255,0.2); border-radius: 10px; height: 8px; overflow: hidden; }
+        .progress-fill { background: linear-gradient(90deg, #10b981, #667eea); height: 100%; border-radius: 10px; transition: width 0.3s ease; width: 0%; }
         
-        /* Expert Badge */
-        .expert-badge {
-            background: rgba(245, 158, 11, 0.2);
-            border: 1px solid #f59e0b;
-            border-radius: 8px;
-            padding: 8px;
-            margin: 10px 0;
-            text-align: center;
-        }
+        .expert-badge { background: rgba(245, 158, 11, 0.2); border: 1px solid #f59e0b; border-radius: 8px; padding: 8px; margin: 10px 0; text-align: center; }
         .expert-badge span { color: #f59e0b; font-size: 12px; }
         
-        /* Buttons */
         .button-group { display: flex; gap: 10px; margin: 15px 0; flex-wrap: wrap; }
         button {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -517,7 +540,6 @@ def home():
         .expert-btn { background: linear-gradient(135deg, #f59e0b, #d97706); border: 1px solid #f59e0b; }
         .auto-btn { background: linear-gradient(135deg, #10b981, #059669); }
         
-        /* Response Area */
         .response-area {
             background: rgba(0,0,0,0.3);
             border-radius: 12px;
@@ -527,7 +549,6 @@ def home():
             overflow-y: auto;
         }
         
-        /* Step Entry */
         .step-entry {
             background: rgba(255,255,255,0.08);
             border-radius: 10px;
@@ -545,19 +566,16 @@ def home():
         .step-explanation { font-size: 11px; color: #aaa; margin-top: 5px; }
         .expert-warning { color: #f59e0b; font-size: 11px; margin-top: 5px; }
         
-        /* Score Display */
-        .score-display { font-size: 20px; font-weight: bold; color: #667eea; text-align: center; padding: 10px; background: rgba(102,126,234,0.2); border-radius: 10px; margin: 10px 0; }
+        .score-display { font-size: 20px; font-weight: bold; text-align: center; padding: 10px; border-radius: 10px; margin: 10px 0; }
+        .score-perfect { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+        .score-penalty { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
+        .score-normal { background: rgba(102, 126, 234, 0.2); color: #667eea; }
         
-        .status {
-            position: fixed;
-            bottom: 15px;
-            right: 15px;
-            background: rgba(0,0,0,0.7);
-            padding: 6px 12px;
-            border-radius: 20px;
-            font-size: 11px;
-            color: #10b981;
-        }
+        .completion-message { padding: 10px; border-radius: 8px; margin-top: 10px; font-size: 13px; font-weight: bold; text-align: center; }
+        .completion-perfect { background: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid #10b981; }
+        .completion-penalty { background: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid #f59e0b; }
+        
+        .status { position: fixed; bottom: 15px; right: 15px; background: rgba(0,0,0,0.7); padding: 6px 12px; border-radius: 20px; font-size: 11px; color: #10b981; }
         .empty-state { text-align: center; color: rgba(255,255,255,0.4); padding: 20px; }
     </style>
 </head>
@@ -583,7 +601,7 @@ def home():
             } catch(e) { document.getElementById('status').innerHTML = '🔴 Offline'; }
         }
 
-        async function resetTask(taskId) {
+        async function resetTask(taskId, maxScore) {
             try {
                 const res = await fetch(`${API_BASE}/reset/${taskId}`);
                 const data = await res.json();
@@ -592,8 +610,16 @@ def home():
                 const responseDiv = document.getElementById(`response-${taskId}`);
                 responseDiv.innerHTML = `<div class="empty-state">✅ Environment reset. Ready for training.</div>`;
                 
-                // Update progress bar
-                updateProgress(taskId, 0);
+                // Reset progress bar
+                const progressFill = document.getElementById(`progress-${taskId}`);
+                if (progressFill) progressFill.style.width = '0%';
+                
+                // Reset score display
+                const scoreDiv = document.getElementById(`score-display-${taskId}`);
+                if (scoreDiv) {
+                    scoreDiv.innerHTML = `Score: 0.00 / ${maxScore.toFixed(2)}`;
+                    scoreDiv.className = 'score-display score-normal';
+                }
                 
                 const stepBtn = document.getElementById(`step-${taskId}`);
                 stepBtn.disabled = false;
@@ -604,22 +630,23 @@ def home():
                 
                 const autoBtn = document.getElementById(`auto-${taskId}`);
                 if (autoBtn) autoBtn.disabled = false;
+                
+                // Clear completion message
+                const completionDiv = document.getElementById(`completion-${taskId}`);
+                if (completionDiv) completionDiv.innerHTML = '';
+                
             } catch(e) { alert('Reset error: ' + e.message); }
         }
         
-        function updateProgress(taskId, scoreValue) {
+        function updateProgress(taskId, scoreValue, maxScore) {
             const progressFill = document.getElementById(`progress-${taskId}`);
             if (progressFill) {
-                const percent = scoreValue * 100;
+                const percent = (scoreValue / maxScore) * 100;
                 progressFill.style.width = `${percent}%`;
-            }
-            const scoreSpan = document.getElementById(`score-${taskId}`);
-            if (scoreSpan) {
-                scoreSpan.textContent = `${(scoreValue * 100).toFixed(0)}%`;
             }
         }
 
-        async function takeStep(taskId, useExpert = false) {
+        async function takeStep(taskId, useExpert = false, maxScore) {
             if (!currentSessions[taskId]) { alert('Please reset first!'); return; }
             
             const stepBtn = document.getElementById(`step-${taskId}`);
@@ -639,7 +666,7 @@ def home():
                 const responseDiv = document.getElementById(`response-${taskId}`);
                 const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
                 const expertClass = data.used_expert ? 'expert-used' : '';
-                const expertWarning = data.used_expert ? `<div class="expert-warning">⚠️ Expert Used! Penalty: -0.2 (Total expert uses: ${data.expert_used_count})</div>` : '';
+                const expertWarning = data.used_expert ? `<div class="expert-warning">🎓 Expert Used! Penalty: -0.2 (Total: ${data.expert_used_count})</div>` : '';
                 
                 const stepHtml = `
                     <div class="step-entry ${expertClass}">
@@ -650,14 +677,36 @@ def home():
                         <div class="step-action">Action: ${JSON.stringify(data.action)}</div>
                         <div class="step-explanation">📖 ${data.reward_explanation}</div>
                         ${expertWarning}
-                        ${data.message ? `<div style="margin-top: 8px; color: #10b981;">🎉 ${data.message}</div>` : ''}
                     </div>
                 `;
                 
                 responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
                 
+                // Update score display
+                const scoreDiv = document.getElementById(`score-display-${taskId}`);
+                if (scoreDiv) {
+                    scoreDiv.innerHTML = `Score: ${data.score_display}`;
+                    if (data.perfect_completion) {
+                        scoreDiv.className = 'score-display score-perfect';
+                    } else if (data.expert_used_count > 0 && data.done) {
+                        scoreDiv.className = 'score-display score-penalty';
+                    } else {
+                        scoreDiv.className = 'score-display score-normal';
+                    }
+                }
+                
                 // Update progress
-                updateProgress(taskId, data.score_value);
+                updateProgress(taskId, data.score, maxScore);
+                
+                // Show completion message if done
+                const completionDiv = document.getElementById(`completion-${taskId}`);
+                if (completionDiv && data.done) {
+                    if (data.perfect_completion) {
+                        completionDiv.innerHTML = `<div class="completion-message completion-perfect">🎉 PERFECT COMPLETION! No expert used, optimal score achieved!</div>`;
+                    } else {
+                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with penalties (expert used: ${data.expert_used_count} times, score reduced to ${data.score_display})</div>`;
+                    }
+                }
                 
                 if (data.done) {
                     stepBtn.disabled = true;
@@ -678,8 +727,8 @@ def home():
             }
         }
 
-        async function runFullTask(taskId) {
-            if (!currentSessions[taskId]) { await resetTask(taskId); await new Promise(r => setTimeout(r, 500)); }
+        async function runFullTask(taskId, maxScore) {
+            if (!currentSessions[taskId]) { await resetTask(taskId, maxScore); await new Promise(r => setTimeout(r, 500)); }
             
             const stepBtn = document.getElementById(`step-${taskId}`);
             const expertBtn = document.getElementById(`expert-${taskId}`);
@@ -715,11 +764,22 @@ def home():
                         </div>
                         <div class="step-action">Action: ${JSON.stringify(data.action)}</div>
                         <div class="step-explanation">📖 ${data.reward_explanation}</div>
-                        ${data.message ? `<div style="margin-top: 8px; color: #10b981;">🎉 ${data.message}</div>` : ''}
                     </div>
                 `;
                 responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
-                updateProgress(taskId, data.score_value);
+                
+                const scoreDiv = document.getElementById(`score-display-${taskId}`);
+                if (scoreDiv) scoreDiv.innerHTML = `Score: ${data.score_display}`;
+                updateProgress(taskId, data.score, maxScore);
+                
+                const completionDiv = document.getElementById(`completion-${taskId}`);
+                if (completionDiv && data.done) {
+                    if (data.perfect_completion) {
+                        completionDiv.innerHTML = `<div class="completion-message completion-perfect">🎉 PERFECT COMPLETION! No expert used, optimal score achieved!</div>`;
+                    } else {
+                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with penalties (expert used: ${data.expert_used_count} times, score reduced to ${data.score_display})</div>`;
+                    }
+                }
             }
             
             autoBtn.disabled = true;
@@ -741,21 +801,22 @@ def home():
                         <div class="task-desc">${t.description}</div>
                         
                         <div class="progress-section">
-                            <div class="progress-label"><span>Progress</span><span id="score-${t.task_id}">0%</span></div>
+                            <div class="progress-label"><span>Progress</span><span id="progress-label-${t.task_id}">0%</span></div>
                             <div class="progress-bar-container"><div id="progress-${t.task_id}" class="progress-fill" style="width: 0%"></div></div>
                         </div>
                         
-                        <div class="score-display" id="score-display-${t.task_id}">Score: 0.00 / ${t.expected_reward.toFixed(2)}</div>
+                        <div id="score-display-${t.task_id}" class="score-display score-normal">Score: 0.00 / ${t.max_score.toFixed(2)}</div>
                         
                         <div class="button-group">
-                            <button class="reset-btn" onclick="resetTask('${t.task_id}')">🔄 Reset</button>
-                            <button id="step-${t.task_id}" onclick="takeStep('${t.task_id}', false)" disabled>🤖 Take Step</button>
-                            <button id="expert-${t.task_id}" class="expert-btn" onclick="takeStep('${t.task_id}', true)" disabled>🎓 Ask Expert (-0.2)</button>
-                            <button id="auto-${t.task_id}" class="auto-btn" onclick="runFullTask('${t.task_id}')" disabled>⚡ Run Full Episode</button>
+                            <button class="reset-btn" onclick="resetTask('${t.task_id}', ${t.max_score})">🔄 Reset</button>
+                            <button id="step-${t.task_id}" onclick="takeStep('${t.task_id}', false, ${t.max_score})" disabled>🤖 Take Step</button>
+                            <button id="expert-${t.task_id}" class="expert-btn" onclick="takeStep('${t.task_id}', true, ${t.max_score})" disabled>🎓 Ask Expert (-0.2)</button>
+                            <button id="auto-${t.task_id}" class="auto-btn" onclick="runFullTask('${t.task_id}', ${t.max_score})" disabled>⚡ Run Full Episode</button>
                         </div>
                         
                         <div class="expert-badge"><span>🎓 Ask Expert: Get guidance (-0.2 penalty per use)</span></div>
                         
+                        <div id="completion-${t.task_id}"></div>
                         <div id="response-${t.task_id}" class="response-area">
                             <div class="empty-state">🔄 Click "Reset" to start training</div>
                         </div>
