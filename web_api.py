@@ -91,6 +91,25 @@ REWARD_CONFIG = {
             2: {"action_type": "send_reply", "message": "Please provide your new address."},
             3: {"action_type": "send_reply", "message": "Please confirm your new address."}
         }
+    },
+    "ambiguous_request": {
+        "step1_correct": 0.3,
+        "step2_correct": 0.35,
+        "step3_correct": 0.35,
+        "wrong_action": -0.3,
+        "ask_expert_penalty": -0.2,
+        "max_score": 1.0,
+        "user_input": "I didn't receive my order and I recently changed my address.",
+        "expert_hint": {
+            1: '{"action_type": "lookup_order", "order_id": "12345"} - First check the order status',
+            2: '{"action_type": "send_reply", "message": "I see you changed your address. Please confirm your new address so I can update our records and check your order."} - Ask for address confirmation',
+            3: '{"action_type": "send_reply", "message": "Thank you for confirming. I will update your address and investigate your missing order. A replacement will be sent to your new address within 3-5 business days."} - Resolve both issues'
+        },
+        "correct_actions": {
+            1: {"action_type": "lookup_order", "order_id": "12345"},
+            2: {"action_type": "send_reply", "message": "I see you changed your address. Please confirm your new address so I can update our records and check your order."},
+            3: {"action_type": "send_reply", "message": "Thank you for confirming. I will update your address and investigate your missing order. A replacement will be sent to your new address within 3-5 business days."}
+        }
     }
 }
 
@@ -147,13 +166,39 @@ def get_task_prompt(task_id: str, step_num: int, history: List, use_expert: bool
             base += f"\n\n🎓 EXPERT ADVICE: Use exactly: {REWARD_CONFIG[task_id]['expert_hint'].get(step_num, correct_action)}"
         return base
     
+    elif task_id == "ambiguous_request":
+        user_input = REWARD_CONFIG[task_id]["user_input"]
+        
+        if step_num == 1:
+            step_desc = "STEP 1: The customer says: '" + user_input + "' First, check their order status."
+            correct_action = REWARD_CONFIG[task_id]["correct_actions"][1]
+        elif step_num == 2:
+            step_desc = "STEP 2: Now ask the customer to confirm their new address to handle both issues."
+            correct_action = REWARD_CONFIG[task_id]["correct_actions"][2]
+        elif step_num == 3:
+            step_desc = "STEP 3: Confirm the address update and resolve the missing order issue."
+            correct_action = REWARD_CONFIG[task_id]["correct_actions"][3]
+        else:
+            step_desc = "Complete the customer support process."
+            correct_action = {"action_type": "send_reply", "message": "Your issues have been resolved."}
+        
+        base = (
+            f"You are a Customer Support AI handling complex customer issues.\n\n"
+            f"{step_desc}\n\n"
+            f"You MUST respond with EXACTLY this JSON:\n{json.dumps(correct_action)}\n\n"
+            "Only respond with the JSON above. No extra text."
+        )
+        if use_expert:
+            base += f"\n\n🎓 EXPERT ADVICE: Use exactly: {REWARD_CONFIG[task_id]['expert_hint'].get(step_num, correct_action)}"
+        return base
+    
     else:
         return "Return valid JSON with action_type field."
 
 def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
     """Fallback action if AI fails"""
     config = REWARD_CONFIG[task_id]
-    if task_id == "address_change_hard":
+    if task_id in ["address_change_hard", "ambiguous_request"]:
         return config["correct_actions"].get(step_num, {"action_type": "send_reply", "message": "OK"})
     else:
         return config["correct_action"]
@@ -164,7 +209,7 @@ def call_ai_model(task_id: str, step_num: int, history: List, use_expert: bool =
     # If expert is requested, return the correct action directly
     if use_expert:
         print(f"🎓 Expert advice requested for {task_id} step {step_num}")
-        if task_id == "address_change_hard":
+        if task_id in ["address_change_hard", "ambiguous_request"]:
             return REWARD_CONFIG[task_id]["correct_actions"].get(step_num, get_step_default_action(task_id, step_num))
         else:
             return REWARD_CONFIG[task_id]["correct_action"]
@@ -232,6 +277,7 @@ def validate_action(task_id: str, step: int, action_dict: Dict, used_expert: boo
     config = REWARD_CONFIG[task_id]
     expert_penalty = config["ask_expert_penalty"] if used_expert else 0
     
+    # Order Status Easy Task
     if task_id == "order_status_easy":
         expected = config["correct_action"]
         if action_dict.get("action_type") == expected["action_type"] and action_dict.get("order_id") == expected["order_id"]:
@@ -241,6 +287,7 @@ def validate_action(task_id: str, step: int, action_dict: Dict, used_expert: boo
         else:
             return False, config["wrong_action"], "❌ Wrong action. Expected: lookup_order with order_id 12345", "lookup_order with order_id 12345", False
     
+    # Refund Policy Medium Task
     if task_id == "refund_policy_medium":
         expected = config["correct_action"]
         if action_dict.get("action_type") == expected["action_type"] and "refund" in action_dict.get("message", "").lower():
@@ -250,6 +297,7 @@ def validate_action(task_id: str, step: int, action_dict: Dict, used_expert: boo
         else:
             return False, config["wrong_action"], "❌ Wrong action. Expected a reply explaining the refund policy with 'refund'", "send_reply with refund policy", False
     
+    # Address Change Hard Task
     if task_id == "address_change_hard":
         expected = config["correct_actions"].get(step)
         if not expected:
@@ -278,6 +326,36 @@ def validate_action(task_id: str, step: int, action_dict: Dict, used_expert: boo
                 return True, round(max(0, reward), 2), "✅ Step 3/3: Address confirmed", "send_reply asking for confirmation", is_perfect
             else:
                 return False, config["wrong_action"], "❌ Step 3: Ask customer to confirm the new address", "send_reply asking for confirmation", False
+    
+    # Ambiguous Request Task (New)
+    if task_id == "ambiguous_request":
+        expected = config["correct_actions"].get(step)
+        if not expected:
+            return False, config["wrong_action"], "❌ Invalid step", "correct action for this step", False
+        
+        if step == 1:
+            if action_dict.get("action_type") == expected["action_type"] and action_dict.get("order_id") == expected["order_id"]:
+                reward = config["step1_correct"] + expert_penalty
+                is_perfect = not used_expert and reward >= config["step1_correct"]
+                return True, round(max(0, reward), 2), "✅ Step 1/3: Order located", "lookup_order with order_id 12345", is_perfect
+            else:
+                return False, config["wrong_action"], "❌ Step 1: First check the order status", "lookup_order with order_id 12345", False
+        
+        elif step == 2:
+            if action_dict.get("action_type") == expected["action_type"] and "address" in action_dict.get("message", "").lower():
+                reward = config["step2_correct"] + expert_penalty
+                is_perfect = not used_expert and reward >= config["step2_correct"]
+                return True, round(max(0, reward), 2), "✅ Step 2/3: Address confirmation requested", "send_reply asking for address confirmation", is_perfect
+            else:
+                return False, config["wrong_action"], "❌ Step 2: Ask customer to confirm their new address", "send_reply asking for address confirmation", False
+        
+        elif step == 3:
+            if action_dict.get("action_type") == expected["action_type"]:
+                reward = config["step3_correct"] + expert_penalty
+                is_perfect = not used_expert and reward >= config["step3_correct"]
+                return True, round(max(0, reward), 2), "✅ Step 3/3: Both issues resolved", "send_reply resolving both issues", is_perfect
+            else:
+                return False, config["wrong_action"], "❌ Step 3: Confirm address update and resolve missing order", "send_reply resolving both issues", False
     
     return False, -0.3, "❌ Invalid action format", "valid JSON", False
 
@@ -395,7 +473,7 @@ def step_ai(req: StepRequest):
     
     # Determine if task is complete
     all_steps_complete = False
-    if session["task_id"] == "address_change_hard":
+    if session["task_id"] in ["address_change_hard", "ambiguous_request"]:
         all_steps_complete = session["steps"] >= 3
     else:
         all_steps_complete = session["steps"] >= 1
@@ -461,7 +539,8 @@ def tasks():
         "tasks": [
             {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Look up order status using lookup_order", "difficulty": "easy", "max_steps": 3, "max_score": 1.0},
             {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Explain refund policy in a reply", "difficulty": "medium", "max_steps": 3, "max_score": 1.0},
-            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Handle address change in 3 steps", "difficulty": "hard", "max_steps": 5, "max_score": 1.0}
+            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Handle address change in 3 steps", "difficulty": "hard", "max_steps": 5, "max_score": 1.0},
+            {"task_id": "ambiguous_request", "name": "Ambiguous Customer Intent", "description": "Customer has both order issue and address change - requires handling both", "difficulty": "hard+", "max_steps": 5, "max_score": 1.0}
         ]
     }
 
@@ -507,6 +586,7 @@ def home():
         .easy { background: #10b981; }
         .medium { background: #f59e0b; }
         .hard { background: #ef4444; }
+        .hard-plus { background: #8b5cf6; }
         .task-desc { color: rgba(255,255,255,0.7); font-size: 13px; margin-bottom: 15px; }
         
         .progress-section { margin: 15px 0; }
@@ -791,11 +871,14 @@ def home():
                 const res = await fetch(`${API_BASE}/tasks`);
                 const data = await res.json();
                 const grid = document.getElementById('tasks');
-                grid.innerHTML = data.tasks.map(t => `
+                grid.innerHTML = data.tasks.map(t => {
+                    let difficultyClass = t.difficulty;
+                    if (t.difficulty === 'hard+') difficultyClass = 'hard-plus';
+                    return `
                     <div class="task-card">
                         <div class="task-header">
                             <h3>${t.name}</h3>
-                            <span class="difficulty ${t.difficulty}">${t.difficulty.toUpperCase()}</span>
+                            <span class="difficulty ${difficultyClass}">${t.difficulty.toUpperCase()}</span>
                         </div>
                         <div class="task-desc">${t.description}</div>
                         
@@ -820,7 +903,7 @@ def home():
                             <div class="empty-state">🔄 Click "Reset" to start training</div>
                         </div>
                     </div>
-                `).join('');
+                `}).join('');
             } catch(e) { console.error(e); }
         }
 

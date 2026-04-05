@@ -1,14 +1,41 @@
-from app.models import Action, Observation, Reward
+from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
+
+class Action(BaseModel):
+    action_type: str
+    order_id: Optional[str] = None
+    message: Optional[str] = None
+
+class Observation(BaseModel):
+    task_id: str
+    history: list
+    done: bool
+
+class Reward(BaseModel):
+    value: float
+    info: Optional[Dict[str, Any]] = None
 
 class CustomerSupportEnv:
     def __init__(self, task_id: str):
         self.task_id = task_id
         self.history = []
         self.done = False
+        self.step_count = 0
+        self.total_reward = 0.0
+        
+        # Task-specific state
+        if task_id == "address_change_hard":
+            self.expected_steps = 3
+        elif task_id == "ambiguous_request":
+            self.expected_steps = 3
+        else:
+            self.expected_steps = 1
 
     def reset(self):
         self.history = []
         self.done = False
+        self.step_count = 0
+        self.total_reward = 0.0
         return self.state()
 
     def state(self):
@@ -21,58 +48,70 @@ class CustomerSupportEnv:
     def step(self, action: Action):
         reward = self.evaluate(action)
         self.history.append(action.dict())
+        self.step_count += 1
+        self.total_reward += reward.value
+        
+        # Check if task is complete
+        if self.step_count >= self.expected_steps:
+            self.done = True
 
-        self.done = self.check_done()
-
-        return self.state(), Reward(value=reward), self.done, {}
+        return self.state(), Reward(value=reward.value), self.done, {}
 
     # =========================
     # TASK LOGIC
     # =========================
 
     def evaluate(self, action: Action):
-        step = len(self.history)
+        step = self.step_count
+        
+        # Order Status Easy Task
+        if self.task_id == "order_status_easy":
+            if action.action_type == "lookup_order" and action.order_id == "12345":
+                return Reward(value=1.0)
+            return Reward(value=-0.3)
 
-        if self.task_id == "address_change_hard":
-
-            if step == 0:
-                return 0.6 if action.action_type == "lookup_order" else -0.3
-
-            elif step == 1:
-                if action.action_type == "send_reply" and "address" in (action.message or "").lower():
-                    return 0.2
-                return -0.2
-
-            elif step == 2:
-                if action.action_type == "send_reply" and "confirm" in (action.message or "").lower():
-                    return 0.2
-                return -0.2
-
-        elif self.task_id == "order_status_easy":
-            return 1.0 if action.action_type == "lookup_order" else -0.2
-
+        # Refund Policy Medium Task
         elif self.task_id == "refund_policy_medium":
-            if action.action_type == "send_reply" and "refund" in (action.message or "").lower():
-                return 1.0
-            return -0.2
+            if action.action_type == "send_reply" and action.message and "refund" in action.message.lower():
+                return Reward(value=1.0)
+            return Reward(value=-0.3)
 
-        return 0.0
+        # Address Change Hard Task
+        elif self.task_id == "address_change_hard":
+            if step == 0:  # Step 1
+                if action.action_type == "lookup_order" and action.order_id == "12345":
+                    return Reward(value=0.6)
+                return Reward(value=-0.3)
+            elif step == 1:  # Step 2
+                if action.action_type == "send_reply" and action.message and "address" in action.message.lower():
+                    return Reward(value=0.2)
+                return Reward(value=-0.3)
+            elif step == 2:  # Step 3
+                if action.action_type == "send_reply" and action.message and "confirm" in action.message.lower():
+                    return Reward(value=0.2)
+                return Reward(value=-0.3)
+            return Reward(value=0.0)
 
-    def check_done(self):
-        if self.task_id == "address_change_hard":
-            if len(self.history) < 3:
-                return False
+        # Ambiguous Request Task (NEW)
+        elif self.task_id == "ambiguous_request":
+            if step == 0:  # Step 1 - Lookup order
+                if action.action_type == "lookup_order" and action.order_id == "12345":
+                    return Reward(value=0.3)
+                return Reward(value=-0.3)
+            elif step == 1:  # Step 2 - Ask for address confirmation
+                if action.action_type == "send_reply" and action.message and "address" in action.message.lower():
+                    return Reward(value=0.35)
+                return Reward(value=-0.3)
+            elif step == 2:  # Step 3 - Resolve both issues
+                if action.action_type == "send_reply" and action.message:
+                    # Check if message addresses both issues
+                    msg = action.message.lower()
+                    if "address" in msg and ("order" in msg or "delivery" in msg or "ship" in msg):
+                        return Reward(value=0.35)
+                    elif "address" in msg:
+                        return Reward(value=0.2)  # Partial credit
+                    return Reward(value=-0.2)
+                return Reward(value=-0.3)
+            return Reward(value=0.0)
 
-            return (
-                self.history[0]["action_type"] == "lookup_order"
-                and "address" in (self.history[1].get("message") or "").lower()
-                and "confirm" in (self.history[2].get("message") or "").lower()
-            )
-
-        elif self.task_id == "order_status_easy":
-            return any(a["action_type"] == "lookup_order" for a in self.history)
-
-        elif self.task_id == "refund_policy_medium":
-            return any("refund" in (a.get("message") or "").lower() for a in self.history)
-
-        return False
+        return Reward(value=0.0)
