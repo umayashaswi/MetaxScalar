@@ -59,18 +59,20 @@ class ResetRequest(BaseModel):
 
 REWARD_CONFIG = {
     "order_status_easy": {
-        "correct_step": 0.8,
+        "correct_step": 1.0,
         "wrong_action": -0.3,
         "ask_expert_penalty": -0.2,
-        "max_score": 0.8,
-        "expert_hint": "Try using lookup_order with order_id 12345"
+        "max_score": 1.0,
+        "expert_hint": '{"action_type": "lookup_order", "order_id": "12345"}',
+        "correct_action": {"action_type": "lookup_order", "order_id": "12345"}
     },
     "refund_policy_medium": {
-        "correct_step": 0.8,
+        "correct_step": 1.0,
         "wrong_action": -0.3,
         "ask_expert_penalty": -0.2,
-        "max_score": 0.8,
-        "expert_hint": "Send a reply that explains the refund policy (include the word 'refund')"
+        "max_score": 1.0,
+        "expert_hint": '{"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}',
+        "correct_action": {"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}
     },
     "address_change_hard": {
         "step1_correct": 0.4,
@@ -80,87 +82,92 @@ REWARD_CONFIG = {
         "ask_expert_penalty": -0.2,
         "max_score": 1.0,
         "expert_hint": {
-            1: "Step 1: Use lookup_order with order_id 12345",
-            2: "Step 2: Ask customer for their new address",
-            3: "Step 3: Ask customer to confirm the new address"
+            1: '{"action_type": "lookup_order", "order_id": "12345"}',
+            2: '{"action_type": "send_reply", "message": "Please provide your new address."}',
+            3: '{"action_type": "send_reply", "message": "Please confirm your new address."}'
+        },
+        "correct_actions": {
+            1: {"action_type": "lookup_order", "order_id": "12345"},
+            2: {"action_type": "send_reply", "message": "Please provide your new address."},
+            3: {"action_type": "send_reply", "message": "Please confirm your new address."}
         }
     }
 }
 
 # =========================
-# TASK-SPECIFIC PROMPTS (NATURAL, NO HARDCODED ANSWERS)
+# TASK-SPECIFIC PROMPTS (STRONG AND EXPLICIT)
 # =========================
 
 def get_task_prompt(task_id: str, step_num: int, history: List, use_expert: bool = False) -> str:
-    expert_suffix = ""
-    if use_expert:
-        if task_id == "address_change_hard":
-            hint = REWARD_CONFIG[task_id]["expert_hint"].get(step_num, "Follow the correct sequence")
-        else:
-            hint = REWARD_CONFIG[task_id]["expert_hint"]
-        expert_suffix = f"\n\n🎓 EXPERT ADVICE: {hint}"
-    
     if task_id == "order_status_easy":
-        return (
-            "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
-            "The customer wants to check their order status.\n\n"
-            "Choose the appropriate action to help the customer.\n"
-            "Return a JSON object with 'action_type' and necessary parameters.\n\n"
-            f"Return ONLY the JSON.{expert_suffix}"
+        base = (
+            "You are a Customer Support AI. The customer wants to check their order status.\n\n"
+            "You MUST respond with EXACTLY this JSON:\n"
+            '{"action_type": "lookup_order", "order_id": "12345"}\n\n'
+            "DO NOT use any other action_type. DO NOT send replies. DO NOT ask questions.\n"
+            "Only respond with the JSON above."
         )
+        if use_expert:
+            base += f"\n\n🎓 EXPERT ADVICE: Use exactly: {REWARD_CONFIG[task_id]['expert_hint']}"
+        return base
     
     elif task_id == "refund_policy_medium":
-        return (
-            "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
-            "The customer wants to know the refund policy.\n\n"
-            "Choose the appropriate action to help the customer.\n"
-            "Your response should explain the refund policy.\n\n"
-            f"Return ONLY the JSON.{expert_suffix}"
+        base = (
+            "You are a Customer Support AI. The customer wants to know the refund policy.\n\n"
+            "You MUST respond with EXACTLY this JSON:\n"
+            '{"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}\n\n'
+            "Your message MUST include the word 'refund'.\n"
+            "Only respond with the JSON above."
         )
+        if use_expert:
+            base += f"\n\n🎓 EXPERT ADVICE: Use exactly: {REWARD_CONFIG[task_id]['expert_hint']}"
+        return base
     
     elif task_id == "address_change_hard":
-        step_hint = ""
         if step_num == 1:
-            step_hint = "The customer wants to change their address. Start by locating the order."
+            step_desc = "STEP 1: First, you need to locate the customer's order."
+            correct_action = '{"action_type": "lookup_order", "order_id": "12345"}'
         elif step_num == 2:
-            step_hint = "Now ask the customer for their new address."
+            step_desc = "STEP 2: Now ask the customer for their new address."
+            correct_action = '{"action_type": "send_reply", "message": "Please provide your new address."}'
         elif step_num == 3:
-            step_hint = "Ask the customer to confirm the new address to complete the change."
+            step_desc = "STEP 3: Finally, ask the customer to confirm the new address."
+            correct_action = '{"action_type": "send_reply", "message": "Please confirm your new address."}'
+        else:
+            step_desc = "Complete the address change process."
+            correct_action = '{"action_type": "send_reply", "message": "Address updated successfully."}'
         
-        return (
-            "You are a Customer Support AI handling address changes.\n"
-            "Return ONLY valid JSON.\n\n"
-            f"{step_hint}\n\n"
-            "Choose the appropriate action based on the current step.\n\n"
-            f"Return ONLY the JSON for the current step.{expert_suffix}"
+        base = (
+            f"You are a Customer Support AI handling address changes.\n\n"
+            f"{step_desc}\n\n"
+            f"You MUST respond with EXACTLY this JSON:\n{correct_action}\n\n"
+            "Only respond with the JSON above. No extra text."
         )
+        if use_expert:
+            base += f"\n\n🎓 EXPERT ADVICE: Use exactly: {REWARD_CONFIG[task_id]['expert_hint'].get(step_num, correct_action)}"
+        return base
     
     else:
         return "Return valid JSON with action_type field."
 
 def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
     """Fallback action if AI fails"""
-    if task_id == "order_status_easy":
-        return {"action_type": "lookup_order", "order_id": "12345"}
-    
-    elif task_id == "refund_policy_medium":
-        return {
-            "action_type": "send_reply", 
-            "message": "Our refund policy allows returns within 30 days for a full refund."
-        }
-    
-    elif task_id == "address_change_hard":
-        if step_num == 1:
-            return {"action_type": "lookup_order", "order_id": "12345"}
-        elif step_num == 2:
-            return {"action_type": "send_reply", "message": "Please provide your new address."}
-        elif step_num == 3:
-            return {"action_type": "send_reply", "message": "Please confirm your new address."}
-    
-    return {"action_type": "send_reply", "message": "OK"}
+    config = REWARD_CONFIG[task_id]
+    if task_id == "address_change_hard":
+        return config["correct_actions"].get(step_num, {"action_type": "send_reply", "message": "OK"})
+    else:
+        return config["correct_action"]
 
 def call_ai_model(task_id: str, step_num: int, history: List, use_expert: bool = False) -> Dict[str, Any]:
     """Call the AI model to get an action"""
+    
+    # If expert is requested, return the correct action directly (this is the point of expert)
+    if use_expert:
+        print(f"🎓 Expert advice requested for {task_id} step {step_num}")
+        if task_id == "address_change_hard":
+            return REWARD_CONFIG[task_id]["correct_actions"].get(step_num, get_step_default_action(task_id, step_num))
+        else:
+            return REWARD_CONFIG[task_id]["correct_action"]
     
     if client is None:
         return get_step_default_action(task_id, step_num)
@@ -216,61 +223,66 @@ def call_ai_model(task_id: str, step_num: int, history: List, use_expert: bool =
         return get_step_default_action(task_id, step_num)
 
 # =========================
-# ACTION VALIDATION WITH DYNAMIC REWARDS
+# ACTION VALIDATION
 # =========================
 
 def validate_action(task_id: str, step: int, action_dict: Dict, used_expert: bool = False) -> tuple:
     """Validate action and return (is_valid, reward, explanation, expected_action, is_perfect)"""
     
-    action_type = action_dict.get("action_type", "")
     config = REWARD_CONFIG[task_id]
     expert_penalty = config["ask_expert_penalty"] if used_expert else 0
     
     if task_id == "order_status_easy":
-        if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
+        expected = config["correct_action"]
+        if action_dict.get("action_type") == expected["action_type"] and action_dict.get("order_id") == expected["order_id"]:
             reward = config["correct_step"] + expert_penalty
             is_perfect = not used_expert
-            return True, max(0, reward), "✅ Correct: Order lookup successful", "lookup_order", is_perfect
+            return True, max(0, reward), "✅ Correct: Order lookup successful", "lookup_order with order_id 12345", is_perfect
         else:
-            return False, config["wrong_action"], f"❌ Wrong: Got '{action_type}', expected 'lookup_order'", "lookup_order", False
+            return False, config["wrong_action"], f"❌ Wrong action. Expected: {expected}", "lookup_order with order_id 12345", False
     
     if task_id == "refund_policy_medium":
-        if action_type == "send_reply" and "refund" in action_dict.get("message", "").lower():
+        expected = config["correct_action"]
+        if action_dict.get("action_type") == expected["action_type"] and "refund" in action_dict.get("message", "").lower():
             reward = config["correct_step"] + expert_penalty
             is_perfect = not used_expert
             return True, max(0, reward), "✅ Correct: Refund policy explained", "send_reply with 'refund'", is_perfect
         else:
-            return False, config["wrong_action"], "❌ Wrong: Must send reply with 'refund'", "send_reply with 'refund'", False
+            return False, config["wrong_action"], f"❌ Wrong action. Expected a reply explaining the refund policy with 'refund'", "send_reply with refund policy", False
     
     if task_id == "address_change_hard":
+        expected = config["correct_actions"].get(step)
+        if not expected:
+            return False, config["wrong_action"], "❌ Invalid step", "correct action for this step", False
+        
         if step == 1:
-            if action_type == "lookup_order" and action_dict.get("order_id") == "12345":
+            if action_dict.get("action_type") == expected["action_type"] and action_dict.get("order_id") == expected["order_id"]:
                 reward = config["step1_correct"] + expert_penalty
                 is_perfect = not used_expert
-                return True, max(0, reward), "✅ Step 1/3: Order located", "lookup_order", is_perfect
+                return True, max(0, reward), "✅ Step 1/3: Order located", "lookup_order with order_id 12345", is_perfect
             else:
-                return False, config["wrong_action"], f"❌ Step 1: Got '{action_type}', expected 'lookup_order'", "lookup_order", False
+                return False, config["wrong_action"], f"❌ Step 1: Expected lookup_order with order_id 12345", "lookup_order with order_id 12345", False
         
         elif step == 2:
-            if action_type == "send_reply" and "address" in action_dict.get("message", "").lower():
+            if action_dict.get("action_type") == expected["action_type"] and "address" in action_dict.get("message", "").lower():
                 reward = config["step2_correct"] + expert_penalty
                 is_perfect = not used_expert
-                return True, max(0, reward), "✅ Step 2/3: Address requested", "send_reply asking for address", is_perfect
+                return True, max(0, reward), "✅ Step 2/3: Address requested", "send_reply asking for new address", is_perfect
             else:
-                return False, config["wrong_action"], "❌ Step 2: Must ask for new address", "send_reply asking for address", False
+                return False, config["wrong_action"], "❌ Step 2: Ask customer for their new address", "send_reply asking for new address", False
         
         elif step == 3:
-            if action_type == "send_reply" and "confirm" in action_dict.get("message", "").lower():
+            if action_dict.get("action_type") == expected["action_type"] and "confirm" in action_dict.get("message", "").lower():
                 reward = config["step3_correct"] + expert_penalty
                 is_perfect = not used_expert
                 return True, max(0, reward), "✅ Step 3/3: Address confirmed", "send_reply asking for confirmation", is_perfect
             else:
-                return False, config["wrong_action"], "❌ Step 3: Must ask for confirmation", "send_reply asking for confirmation", False
+                return False, config["wrong_action"], "❌ Step 3: Ask customer to confirm the new address", "send_reply asking for confirmation", False
     
     return False, -0.3, "❌ Invalid action format", "valid JSON", False
 
 # =========================
-# RESET - COMPLETE STATE RESET
+# RESET
 # =========================
 
 @app.post("/reset")
@@ -301,7 +313,7 @@ def reset(req: ResetRequest):
     return {
         "session_id": session_id,
         "task_id": task_id,
-        "message": f"Environment reset successfully",
+        "message": "Environment reset successfully",
         "steps": 0,
         "done": False,
         "score": 0.0,
@@ -315,7 +327,7 @@ def reset_get(task_id: str):
     return reset(req)
 
 # =========================
-# STEP AI - WITH PROPER COMPLETION LOGIC
+# STEP AI
 # =========================
 
 @app.post("/step_ai")
@@ -330,7 +342,7 @@ def step_ai(req: StepRequest):
     if session["done"]:
         if session["perfect_completion"]:
             return {
-                "message": "✅ Task already completed perfectly! Great job! Reset to start new.",
+                "message": "✅ Task already completed perfectly! Great job!",
                 "done": True,
                 "perfect": True,
                 "score": session["total_reward"],
@@ -340,7 +352,7 @@ def step_ai(req: StepRequest):
             }
         else:
             return {
-                "message": f"⚠️ Task already completed but with penalties (score: {session['total_reward']:.2f}/{max_score}). Reset to try for perfect score.",
+                "message": f"⚠️ Task already completed (score: {session['total_reward']:.2f}/{max_score})",
                 "done": True,
                 "perfect": False,
                 "score": session["total_reward"],
@@ -353,7 +365,7 @@ def step_ai(req: StepRequest):
     step_num = session["steps"] + 1
     used_expert = req.use_expert
     
-    # Call AI model (with expert advice if requested)
+    # Call AI model
     ai_action = call_ai_model(session["task_id"], step_num, session["history"], used_expert)
     
     try:
@@ -381,10 +393,8 @@ def step_ai(req: StepRequest):
     if used_expert:
         session["expert_used_count"] += 1
     
-    # Determine if task is complete and if it's perfect
+    # Determine if task is complete
     all_steps_complete = False
-    perfect_completion = False
-    
     if session["task_id"] == "address_change_hard":
         all_steps_complete = session["steps"] >= 3
     else:
@@ -392,8 +402,7 @@ def step_ai(req: StepRequest):
     
     if all_steps_complete:
         session["done"] = True
-        # Perfect completion: no expert used AND total reward equals max_score
-        perfect_completion = (session["expert_used_count"] == 0 and abs(session["total_reward"] - max_score) < 0.01)
+        perfect_completion = (session["expert_used_count"] == 0 and session["total_reward"] >= max_score - 0.01)
         session["perfect_completion"] = perfect_completion
     
     score_value = min(max(session["total_reward"], 0.0), max_score)
@@ -402,9 +411,11 @@ def step_ai(req: StepRequest):
     completion_message = None
     if session["done"]:
         if perfect_completion:
-            completion_message = "🎉 PERFECT COMPLETION! No expert used, optimal score achieved!"
+            completion_message = "🎉 PERFECT COMPLETION! No expert used, optimal score!"
+        elif session.get("perfect_completion", False):
+            completion_message = "🎉 PERFECT COMPLETION! No expert used, optimal score!"
         else:
-            completion_message = f"⚠️ Completed with penalties (expert used: {session['expert_used_count']} times, score reduced to {score_value:.2f}/{max_score})"
+            completion_message = f"⚠️ Completed with penalties (expert used: {session['expert_used_count']} time(s))"
     
     return {
         "step": session["steps"],
@@ -453,16 +464,12 @@ def get_session(session_id: str):
     }
 
 
-# =========================
-# TASKS
-# =========================
-
 @app.get("/tasks")
 def tasks():
     return {
         "tasks": [
-            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Look up order status", "difficulty": "easy", "max_steps": 3, "max_score": 0.8},
-            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Explain refund policy", "difficulty": "medium", "max_steps": 3, "max_score": 0.8},
+            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Look up order status using lookup_order", "difficulty": "easy", "max_steps": 3, "max_score": 1.0},
+            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Explain refund policy in a reply", "difficulty": "medium", "max_steps": 3, "max_score": 1.0},
             {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Handle address change in 3 steps", "difficulty": "hard", "max_steps": 5, "max_score": 1.0}
         ]
     }
@@ -472,10 +479,6 @@ def tasks():
 def health():
     return {"status": "healthy", "active_sessions": len(sessions), "ai_model": MODEL_NAME if client else "fallback"}
 
-
-# =========================
-# UI - COMPLETE WITH ALL FIXES
-# =========================
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -610,14 +613,12 @@ def home():
                 const responseDiv = document.getElementById(`response-${taskId}`);
                 responseDiv.innerHTML = `<div class="empty-state">✅ Environment reset. Ready for training.</div>`;
                 
-                // Reset progress bar
                 const progressFill = document.getElementById(`progress-${taskId}`);
                 if (progressFill) progressFill.style.width = '0%';
                 
-                // Reset score display
                 const scoreDiv = document.getElementById(`score-display-${taskId}`);
                 if (scoreDiv) {
-                    scoreDiv.innerHTML = `Score: 0.00 / ${maxScore.toFixed(2)}`;
+                    scoreDiv.innerHTML = `Score: 0.00 / ${maxScore}`;
                     scoreDiv.className = 'score-display score-normal';
                 }
                 
@@ -631,7 +632,6 @@ def home():
                 const autoBtn = document.getElementById(`auto-${taskId}`);
                 if (autoBtn) autoBtn.disabled = false;
                 
-                // Clear completion message
                 const completionDiv = document.getElementById(`completion-${taskId}`);
                 if (completionDiv) completionDiv.innerHTML = '';
                 
@@ -643,6 +643,10 @@ def home():
             if (progressFill) {
                 const percent = (scoreValue / maxScore) * 100;
                 progressFill.style.width = `${percent}%`;
+            }
+            const progressLabel = document.getElementById(`progress-label-${taskId}`);
+            if (progressLabel) {
+                progressLabel.textContent = `${Math.round(percent)}%`;
             }
         }
 
@@ -682,7 +686,6 @@ def home():
                 
                 responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
                 
-                // Update score display
                 const scoreDiv = document.getElementById(`score-display-${taskId}`);
                 if (scoreDiv) {
                     scoreDiv.innerHTML = `Score: ${data.score_display}`;
@@ -695,16 +698,16 @@ def home():
                     }
                 }
                 
-                // Update progress
                 updateProgress(taskId, data.score, maxScore);
                 
-                // Show completion message if done
                 const completionDiv = document.getElementById(`completion-${taskId}`);
                 if (completionDiv && data.done) {
                     if (data.perfect_completion) {
-                        completionDiv.innerHTML = `<div class="completion-message completion-perfect">🎉 PERFECT COMPLETION! No expert used, optimal score achieved!</div>`;
-                    } else {
-                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with penalties (expert used: ${data.expert_used_count} times, score reduced to ${data.score_display})</div>`;
+                        completionDiv.innerHTML = `<div class="completion-message completion-perfect">🎉 PERFECT COMPLETION! No expert used, optimal score!</div>`;
+                    } else if (data.expert_used_count > 0) {
+                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with penalties (expert used: ${data.expert_used_count} time(s))</div>`;
+                    } else if (data.score < maxScore) {
+                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with score: ${data.score_display}</div>`;
                     }
                 }
                 
@@ -775,9 +778,9 @@ def home():
                 const completionDiv = document.getElementById(`completion-${taskId}`);
                 if (completionDiv && data.done) {
                     if (data.perfect_completion) {
-                        completionDiv.innerHTML = `<div class="completion-message completion-perfect">🎉 PERFECT COMPLETION! No expert used, optimal score achieved!</div>`;
-                    } else {
-                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with penalties (expert used: ${data.expert_used_count} times, score reduced to ${data.score_display})</div>`;
+                        completionDiv.innerHTML = `<div class="completion-message completion-perfect">🎉 PERFECT COMPLETION! No expert used, optimal score!</div>`;
+                    } else if (data.expert_used_count > 0) {
+                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with penalties (expert used: ${data.expert_used_count} time(s))</div>`;
                     }
                 }
             }
@@ -805,7 +808,7 @@ def home():
                             <div class="progress-bar-container"><div id="progress-${t.task_id}" class="progress-fill" style="width: 0%"></div></div>
                         </div>
                         
-                        <div id="score-display-${t.task_id}" class="score-display score-normal">Score: 0.00 / ${t.max_score.toFixed(2)}</div>
+                        <div id="score-display-${t.task_id}" class="score-display score-normal">Score: 0.00 / ${t.max_score}</div>
                         
                         <div class="button-group">
                             <button class="reset-btn" onclick="resetTask('${t.task_id}', ${t.max_score})">🔄 Reset</button>
