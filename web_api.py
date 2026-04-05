@@ -95,7 +95,7 @@ REWARD_CONFIG = {
 }
 
 # =========================
-# TASK-SPECIFIC PROMPTS (STRONG AND EXPLICIT)
+# TASK-SPECIFIC PROMPTS
 # =========================
 
 def get_task_prompt(task_id: str, step_num: int, history: List, use_expert: bool = False) -> str:
@@ -161,7 +161,7 @@ def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
 def call_ai_model(task_id: str, step_num: int, history: List, use_expert: bool = False) -> Dict[str, Any]:
     """Call the AI model to get an action"""
     
-    # If expert is requested, return the correct action directly (this is the point of expert)
+    # If expert is requested, return the correct action directly
     if use_expert:
         print(f"🎓 Expert advice requested for {task_id} step {step_num}")
         if task_id == "address_change_hard":
@@ -236,19 +236,19 @@ def validate_action(task_id: str, step: int, action_dict: Dict, used_expert: boo
         expected = config["correct_action"]
         if action_dict.get("action_type") == expected["action_type"] and action_dict.get("order_id") == expected["order_id"]:
             reward = config["correct_step"] + expert_penalty
-            is_perfect = not used_expert
-            return True, max(0, reward), "✅ Correct: Order lookup successful", "lookup_order with order_id 12345", is_perfect
+            is_perfect = not used_expert and reward >= config["correct_step"]
+            return True, round(max(0, reward), 2), "✅ Correct: Order lookup successful", "lookup_order with order_id 12345", is_perfect
         else:
-            return False, config["wrong_action"], f"❌ Wrong action. Expected: {expected}", "lookup_order with order_id 12345", False
+            return False, config["wrong_action"], "❌ Wrong action. Expected: lookup_order with order_id 12345", "lookup_order with order_id 12345", False
     
     if task_id == "refund_policy_medium":
         expected = config["correct_action"]
         if action_dict.get("action_type") == expected["action_type"] and "refund" in action_dict.get("message", "").lower():
             reward = config["correct_step"] + expert_penalty
-            is_perfect = not used_expert
-            return True, max(0, reward), "✅ Correct: Refund policy explained", "send_reply with 'refund'", is_perfect
+            is_perfect = not used_expert and reward >= config["correct_step"]
+            return True, round(max(0, reward), 2), "✅ Correct: Refund policy explained", "send_reply with 'refund'", is_perfect
         else:
-            return False, config["wrong_action"], f"❌ Wrong action. Expected a reply explaining the refund policy with 'refund'", "send_reply with refund policy", False
+            return False, config["wrong_action"], "❌ Wrong action. Expected a reply explaining the refund policy with 'refund'", "send_reply with refund policy", False
     
     if task_id == "address_change_hard":
         expected = config["correct_actions"].get(step)
@@ -258,24 +258,24 @@ def validate_action(task_id: str, step: int, action_dict: Dict, used_expert: boo
         if step == 1:
             if action_dict.get("action_type") == expected["action_type"] and action_dict.get("order_id") == expected["order_id"]:
                 reward = config["step1_correct"] + expert_penalty
-                is_perfect = not used_expert
-                return True, max(0, reward), "✅ Step 1/3: Order located", "lookup_order with order_id 12345", is_perfect
+                is_perfect = not used_expert and reward >= config["step1_correct"]
+                return True, round(max(0, reward), 2), "✅ Step 1/3: Order located", "lookup_order with order_id 12345", is_perfect
             else:
-                return False, config["wrong_action"], f"❌ Step 1: Expected lookup_order with order_id 12345", "lookup_order with order_id 12345", False
+                return False, config["wrong_action"], "❌ Step 1: Expected lookup_order with order_id 12345", "lookup_order with order_id 12345", False
         
         elif step == 2:
             if action_dict.get("action_type") == expected["action_type"] and "address" in action_dict.get("message", "").lower():
                 reward = config["step2_correct"] + expert_penalty
-                is_perfect = not used_expert
-                return True, max(0, reward), "✅ Step 2/3: Address requested", "send_reply asking for new address", is_perfect
+                is_perfect = not used_expert and reward >= config["step2_correct"]
+                return True, round(max(0, reward), 2), "✅ Step 2/3: Address requested", "send_reply asking for new address", is_perfect
             else:
                 return False, config["wrong_action"], "❌ Step 2: Ask customer for their new address", "send_reply asking for new address", False
         
         elif step == 3:
             if action_dict.get("action_type") == expected["action_type"] and "confirm" in action_dict.get("message", "").lower():
                 reward = config["step3_correct"] + expert_penalty
-                is_perfect = not used_expert
-                return True, max(0, reward), "✅ Step 3/3: Address confirmed", "send_reply asking for confirmation", is_perfect
+                is_perfect = not used_expert and reward >= config["step3_correct"]
+                return True, round(max(0, reward), 2), "✅ Step 3/3: Address confirmed", "send_reply asking for confirmation", is_perfect
             else:
                 return False, config["wrong_action"], "❌ Step 3: Ask customer to confirm the new address", "send_reply asking for confirmation", False
     
@@ -375,7 +375,7 @@ def step_ai(req: StepRequest):
         action = Action(**ai_action)
     
     # Validate AI's action
-    is_valid, reward_value, explanation, expected, is_perfect_step = validate_action(
+    is_valid, reward_value, explanation, expected, step_is_perfect = validate_action(
         session["task_id"], step_num, ai_action, used_expert
     )
     
@@ -402,25 +402,16 @@ def step_ai(req: StepRequest):
     
     if all_steps_complete:
         session["done"] = True
+        # Perfect completion: no expert used AND total reward >= max_score
         perfect_completion = (session["expert_used_count"] == 0 and session["total_reward"] >= max_score - 0.01)
         session["perfect_completion"] = perfect_completion
     
     score_value = min(max(session["total_reward"], 0.0), max_score)
     
-    # Generate completion message
-    completion_message = None
-    if session["done"]:
-        if perfect_completion:
-            completion_message = "🎉 PERFECT COMPLETION! No expert used, optimal score!"
-        elif session.get("perfect_completion", False):
-            completion_message = "🎉 PERFECT COMPLETION! No expert used, optimal score!"
-        else:
-            completion_message = f"⚠️ Completed with penalties (expert used: {session['expert_used_count']} time(s))"
-    
     return {
         "step": session["steps"],
         "action": ai_action,
-        "reward": round(reward_value, 2),
+        "reward": reward_value,
         "reward_explanation": explanation,
         "done": session["done"],
         "perfect_completion": session.get("perfect_completion", False),
@@ -433,7 +424,7 @@ def step_ai(req: StepRequest):
         "expert_penalty": -0.2 if used_expert else 0,
         "expert_used_count": session["expert_used_count"],
         "expected_action": expected if not is_valid else None,
-        "completion_message": completion_message
+        "completion_message": "🎉 Task completed!" if session["done"] else None
     }
 
 
@@ -635,17 +626,22 @@ def home():
                 const completionDiv = document.getElementById(`completion-${taskId}`);
                 if (completionDiv) completionDiv.innerHTML = '';
                 
+                const progressLabel = document.getElementById(`progress-label-${taskId}`);
+                if (progressLabel) progressLabel.textContent = '0%';
+                
             } catch(e) { alert('Reset error: ' + e.message); }
         }
         
         function updateProgress(taskId, scoreValue, maxScore) {
             const progressFill = document.getElementById(`progress-${taskId}`);
-            if (progressFill) {
-                const percent = (scoreValue / maxScore) * 100;
-                progressFill.style.width = `${percent}%`;
-            }
             const progressLabel = document.getElementById(`progress-label-${taskId}`);
-            if (progressLabel) {
+            if (progressFill && progressLabel) {
+                let percent = 0;
+                if (maxScore > 0 && scoreValue !== undefined && scoreValue !== null) {
+                    percent = (scoreValue / maxScore) * 100;
+                    percent = Math.min(100, Math.max(0, percent));
+                }
+                progressFill.style.width = `${percent}%`;
                 progressLabel.textContent = `${Math.round(percent)}%`;
             }
         }
