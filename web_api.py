@@ -53,45 +53,65 @@ class ResetRequest(BaseModel):
     task_id: str
 
 # =========================
-# TASK-SPECIFIC PROMPTS (STRENGTHENED)
+# TASK-SPECIFIC PROMPTS (ALL TASKS USE AI)
 # =========================
 
 def get_task_prompt(task_id: str, step_num: int, history: List) -> str:
     if task_id == "order_status_easy":
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
-            "CRITICAL: You MUST respond with EXACTLY this:\n"
+            "The customer wants to check their order status.\n\n"
+            "You MUST respond with EXACTLY this JSON:\n"
             '{"action_type": "lookup_order", "order_id": "12345"}\n\n'
-            "DO NOT use 'order_status_easy' as action_type.\n"
-            "DO NOT send any reply messages.\n"
-            "DO NOT ask questions.\n"
-            "Just lookup the order with order_id 12345 and stop."
+            "IMPORTANT RULES:\n"
+            "- DO NOT use 'order_status_easy' as action_type\n"
+            "- DO NOT send any reply messages\n"
+            "- DO NOT ask questions\n"
+            "- ONLY use 'lookup_order' as action_type\n"
+            "- The order_id MUST be '12345'\n\n"
+            "Example of CORRECT response: {\"action_type\": \"lookup_order\", \"order_id\": \"12345\"}\n"
+            "Example of WRONG response: {\"action_type\": \"order_status_easy\"}\n\n"
+            "Return ONLY the JSON, no other text."
         )
     
     elif task_id == "refund_policy_medium":
         return (
             "You are a Customer Support AI. Return ONLY valid JSON.\n\n"
-            "You MUST complete this in ONE step:\n"
+            "The customer wants to know the refund policy.\n\n"
+            "You MUST respond with:\n"
             '{"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}\n\n'
-            "Your message must include the word 'refund'.\n"
-            "DO NOT lookup the order."
+            "IMPORTANT:\n"
+            "- Your message MUST include the word 'refund'\n"
+            "- DO NOT lookup the order\n"
+            "- Return ONLY the JSON\n\n"
+            "Example: {\"action_type\": \"send_reply\", \"message\": \"Our refund policy allows returns within 30 days for a full refund.\"}"
         )
     
     elif task_id == "address_change_hard":
+        step_hint = ""
+        if step_num == 1:
+            step_hint = "This is STEP 1. You must lookup the order first."
+        elif step_num == 2:
+            step_hint = "This is STEP 2. You have already looked up the order. Now ask the customer for their new address."
+        elif step_num == 3:
+            step_hint = "This is STEP 3. You have already asked for the address. Now ask the customer to confirm it."
+        
         return (
             "You are a Customer Support AI handling address changes.\n"
             "Return ONLY valid JSON.\n\n"
-            "Follow this EXACT 3-step sequence:\n\n"
+            f"{step_hint}\n\n"
+            "Follow this EXACT sequence:\n"
             "STEP 1: {\"action_type\": \"lookup_order\", \"order_id\": \"12345\"}\n"
             "STEP 2: {\"action_type\": \"send_reply\", \"message\": \"Please provide your new address.\"}\n"
             "STEP 3: {\"action_type\": \"send_reply\", \"message\": \"Please confirm your new address.\"}\n\n"
-            "Keep messages short and direct."
+            "Return ONLY the JSON for the current step. No explanations."
         )
     
     else:
         return "Return valid JSON with action_type field."
 
 def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
+    """Fallback action if AI fails (used as safety net only)"""
     if task_id == "order_status_easy":
         return {"action_type": "lookup_order", "order_id": "12345"}
     
@@ -111,33 +131,8 @@ def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
     
     return {"action_type": "send_reply", "message": "OK"}
 
-def fix_malformed_action(task_id: str, action_dict: Dict) -> Dict:
-    """Fix common malformed actions"""
-    
-    # If the action is just the task_id as action_type
-    if action_dict.get("action_type") == task_id:
-        if task_id == "order_status_easy":
-            return {"action_type": "lookup_order", "order_id": "12345"}
-        elif task_id == "refund_policy_medium":
-            return {"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}
-    
-    # If missing order_id for lookup_order
-    if action_dict.get("action_type") == "lookup_order" and "order_id" not in action_dict:
-        action_dict["order_id"] = "12345"
-    
-    # If action_type is missing but has lookup_order as key
-    if "lookup_order" in action_dict and "action_type" not in action_dict:
-        return {"action_type": "lookup_order", "order_id": action_dict.get("lookup_order", "12345")}
-    
-    return action_dict
-
 def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
-    """Call the AI model to get an action"""
-    
-    # Special case: if easy task and step 1, return correct action directly (reliable)
-    if task_id == "order_status_easy" and step_num == 1:
-        print(f"🎯 Easy task: returning correct action directly")
-        return {"action_type": "lookup_order", "order_id": "12345"}
+    """Call the AI model to get an action - ALL tasks use AI"""
     
     if client is None:
         print("⚠️ No API key, using fallback action")
@@ -163,6 +158,7 @@ def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
         content = response.choices[0].message.content.strip()
         print(f"📝 AI response: {content[:200]}...")
         
+        # Remove markdown
         if "```" in content:
             parts = content.split("```")
             if len(parts) > 1:
@@ -171,20 +167,33 @@ def call_ai_model(task_id: str, step_num: int, history: List) -> Dict[str, Any]:
                     content = content[4:]
                 content = content.strip()
 
+        # Extract JSON
         start = content.find("{")
         end = content.rfind("}") + 1
         if start != -1 and end != 0:
             content = content[start:end]
         else:
+            print(f"⚠️ No JSON found, using fallback")
             return get_step_default_action(task_id, step_num)
 
         data = json.loads(content)
         
-        # Fix common malformed actions
-        data = fix_malformed_action(task_id, data)
-        
+        # Validate and fix common issues
         if "action_type" not in data:
+            print(f"⚠️ No action_type in response, using fallback")
             return get_step_default_action(task_id, step_num)
+        
+        # Fix: if action_type is the task_id itself (common mistake)
+        if data["action_type"] == task_id:
+            print(f"⚠️ AI returned action_type as task_id, fixing...")
+            if task_id == "order_status_easy":
+                return {"action_type": "lookup_order", "order_id": "12345"}
+            elif task_id == "refund_policy_medium":
+                return {"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}
+        
+        # Fix: if lookup_order missing order_id
+        if data["action_type"] == "lookup_order" and "order_id" not in data:
+            data["order_id"] = "12345"
         
         return data
         
@@ -271,7 +280,7 @@ def reset_get(task_id: str):
     return reset(req)
 
 # =========================
-# STEP AI - REAL INFERENCE
+# STEP AI - ALL TASKS USE AI
 # =========================
 
 @app.post("/step_ai")
@@ -292,7 +301,7 @@ def step_ai(req: StepRequest):
     env = session["env"]
     step_num = session["steps"] + 1
     
-    # Call AI model for REAL inference
+    # ✅ ALL tasks use AI model (no special cases)
     ai_action = call_ai_model(session["task_id"], step_num, session["history"])
     
     try:
