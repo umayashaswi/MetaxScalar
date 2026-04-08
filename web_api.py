@@ -43,6 +43,7 @@ app = FastAPI(title="Customer Support OpenEnv")
 
 sessions: Dict[str, Dict] = {}
 openenv_session: Optional[CustomerSupportEnv] = None
+openenv_history: List = []
 
 # =========================
 # REQUEST MODELS
@@ -67,7 +68,7 @@ MAX_STEPS = {
 }
 
 # =========================
-# AMBIGUOUS QUERIES (Randomized)
+# AMBIGUOUS QUERIES
 # =========================
 
 AMBIGUOUS_QUERIES = [
@@ -95,32 +96,36 @@ REWARD_CONFIG = {
     "address_change_hard": {
         "max_score": 1.0,
         "expert_hint": [
-            "Step 1: Use {'action_type': 'lookup_order', 'order_id': '12345'}. DO NOT reply yet.",
-            "Step 2: Order is FOUND. DO NOT use lookup_order again. Use {'action_type': 'send_reply', 'message': 'Please provide your new address.'}",
-            "Step 3: Address received. Use {'action_type': 'send_reply', 'message': 'Please confirm this address.'}"
+            "Step 1: Use {'action_type': 'lookup_order', 'order_id': '12345'}",
+            "Step 2: Use {'action_type': 'send_reply', 'message': 'Please provide your new address.'}",
+            "Step 3: Use {'action_type': 'send_reply', 'message': 'Please confirm this address.'}"
         ]
     },
     "ambiguous_request": {
         "max_score": 1.0,
         "expert_hint": [
-            "Step 1: You must check the package location first. Use {'action_type': 'lookup_order', 'order_id': '12345'}.",
-            "Step 2: Order shows 'Returned to Sender'. Use {'action_type': 'send_reply', 'message': 'I see you moved. Can you confirm your new address?'}",
-            "Step 3: Address confirmed. Resolve the issue: {'action_type': 'send_reply', 'message': 'I have updated your address and a replacement is on the way.'}"
+            "Step 1: Use {'action_type': 'lookup_order', 'order_id': '12345'}",
+            "Step 2: Use {'action_type': 'send_reply', 'message': 'Can you confirm your new address?'}",
+            "Step 3: Use {'action_type': 'send_reply', 'message': 'I have updated your address and a replacement is on the way.'}"
         ]
     }
 }
 
 # =========================
-# OPENENV COMPATIBILITY ENDPOINTS (FIXED - NO BODY REQUIRED)
+# OPENENV COMPATIBILITY ENDPOINTS (CRITICAL FIX)
 # =========================
 
 @app.post("/openenv/reset")
-def openenv_reset():
-    """OpenEnv compatible reset endpoint - NO body required"""
-    global openenv_session
+async def openenv_reset():
+    """OpenEnv compatible reset endpoint - NO parameters, NO body expected"""
+    global openenv_session, openenv_history
+    
+    # Create a new environment instance
     openenv_session = CustomerSupportEnv(task_id="order_status_easy")
     obs = openenv_session.reset()
+    openenv_history = []
     
+    # Return exactly what OpenEnv expects
     return {
         "task_id": obs.task_id,
         "history": obs.history,
@@ -129,15 +134,18 @@ def openenv_reset():
     }
 
 @app.post("/openenv/step")
-def openenv_step(action: Action):
+async def openenv_step(action: Action):
     """OpenEnv compatible step endpoint"""
-    global openenv_session
+    global openenv_session, openenv_history
     
     if openenv_session is None:
-        raise HTTPException(400, "Environment not initialized. Call /openenv/reset first.")
+        raise HTTPException(status_code=400, detail="Environment not initialized. Call /openenv/reset first.")
     
+    # Take a step in the environment
     obs, reward, done, info = openenv_session.step(action)
+    openenv_history.append(action.dict())
     
+    # Return exactly what OpenEnv expects
     return {
         "observation": {
             "task_id": obs.task_id,
@@ -151,79 +159,68 @@ def openenv_step(action: Action):
     }
 
 @app.get("/openenv/validate")
-def openenv_validate():
+async def openenv_validate():
     """OpenEnv validation endpoint"""
     return {"status": "ok", "ready": True}
 
-# =========================
-# TASKS ENDPOINT
-# =========================
+@app.get("/openenv/state")
+async def openenv_state():
+    """Get current environment state"""
+    global openenv_session
+    
+    if openenv_session is None:
+        raise HTTPException(status_code=400, detail="Environment not initialized. Call /openenv/reset first.")
+    
+    return {
+        "task_id": openenv_session.task_id,
+        "step_count": openenv_session.step_count,
+        "total_reward": openenv_session.total_reward,
+        "done": openenv_session.done,
+        "history": openenv_session.history
+    }
 
 @app.get("/openenv/tasks")
-def openenv_tasks():
+async def openenv_tasks():
     """List available tasks"""
     return {
         "tasks": [
             {
-                "task_id": "order_status_easy",
+                "id": "order_status_easy",
                 "name": "Order Status Query",
                 "description": "Customer wants to check their order status",
                 "difficulty": "easy",
-                "max_steps": 5,
-                "max_score": 1.0
+                "max_steps": 5
             },
             {
-                "task_id": "refund_policy_medium",
+                "id": "refund_policy_medium",
                 "name": "Refund Policy Explanation",
                 "description": "Customer wants to know the refund policy",
                 "difficulty": "medium",
-                "max_steps": 5,
-                "max_score": 1.0
+                "max_steps": 5
             },
             {
-                "task_id": "address_change_hard",
+                "id": "address_change_hard",
                 "name": "Address Change Request",
                 "description": "Customer wants to change their shipping address",
                 "difficulty": "hard",
-                "max_steps": 8,
-                "max_score": 1.0
+                "max_steps": 8
             },
             {
-                "task_id": "ambiguous_request",
+                "id": "ambiguous_request",
                 "name": "Moved & Missing Package",
                 "description": "Customer issue with moved address and missing package",
                 "difficulty": "hard+",
-                "max_steps": 10,
-                "max_score": 1.0
+                "max_steps": 10
             }
         ]
     }
 
 # =========================
-# STATE ENDPOINT
-# =========================
-
-@app.get("/openenv/state")
-def openenv_state():
-    """Get current environment state"""
-    global openenv_session
-    if openenv_session is None:
-        raise HTTPException(400, "Environment not initialized. Call /openenv/reset first.")
-    
-    return {
-        "task_id": openenv_session.task_id,
-        "history": openenv_session.history,
-        "step_count": openenv_session.step_count,
-        "total_reward": openenv_session.total_reward,
-        "done": openenv_session.done
-    }
-
-# =========================
-# LEGACY ENDPOINTS (for web UI)
+# LEGACY ENDPOINTS (for backward compatibility)
 # =========================
 
 @app.post("/reset")
-def reset(req: ResetRequest):
+async def reset(req: ResetRequest):
     task_id = req.task_id
     env = CustomerSupportEnv(task_id)
     env.reset()
@@ -280,35 +277,113 @@ def reset(req: ResetRequest):
     }
 
 @app.get("/reset/{task_id}")
-def reset_get(task_id: str):
+async def reset_get(task_id: str):
     req = ResetRequest(task_id=task_id)
-    return reset(req)
+    return await reset(req)
 
-@app.get("/state/{session_id}")
-def get_state(session_id: str):
-    if session_id not in sessions:
-        raise HTTPException(404, "Session not found")
+@app.post("/step_ai")
+async def step_ai(req: StepRequest):
+    if req.session_id not in sessions:
+        raise HTTPException(404, "Invalid session_id. Please reset first.")
+
+    session = sessions[req.session_id]
+    config = REWARD_CONFIG[session["task_id"]]
+    max_score = config["max_score"]
+    max_steps_limit = MAX_STEPS[session["task_id"]]
+
+    if session["done"]:
+        return {
+            "message": "Task already completed. Please reset.",
+            "done": True,
+            "score": min(session["total_reward"], max_score),
+            "max_score": max_score,
+            "score_display": f"{min(session['total_reward'], max_score):.2f} / {max_score}",
+            "step": session["steps"],
+            "state": session.get("state", {})
+        }
+
+    env = session["env"]
+    used_expert = req.use_expert
     
-    session = sessions[session_id]
+    ai_action = call_ai_model(session["task_id"], session, used_expert)
+    
+    try:
+        action = Action(**ai_action)
+        parse_success = True
+    except Exception:
+        ai_action = {"action_type": "send_reply", "message": "I'm not sure how to help."}
+        action = Action(**ai_action)
+        parse_success = False
+    
+    is_valid, reward_value, explanation, is_perfect = validate_and_update_state(
+        session["task_id"], ai_action, session, used_expert
+    )
+    
+    if not parse_success:
+        reward_value = -0.5
+        explanation = "❌ Invalid JSON format"
+    
+    obs, env_reward, done, info = env.step(action)
+    
+    env_r = env_reward.value if hasattr(env_reward, "value") else float(env_reward)
+    reward_value = 0.7 * reward_value + 0.3 * env_r
+    
+    session["steps"] += 1
+    session["rewards"].append(reward_value)
+    session["explanations"].append(explanation)
+    session["actions_taken"].append(ai_action)
+    session["total_reward"] += reward_value
+    session["total_reward"] = min(session["total_reward"], max_score)
+    session["total_reward"] = max(session["total_reward"], 0.0)
+    
+    if used_expert:
+        session["expert_used_count"] += 1
+    
+    if session["steps"] >= max_steps_limit:
+        session["done"] = True
+        session["total_reward"] = max(0, session["total_reward"] - 0.3)
+    
+    all_steps_complete = False
+    if session["task_id"] == "order_status_easy":
+        all_steps_complete = session.get("order_checked", False)
+    elif session["task_id"] == "refund_policy_medium":
+        all_steps_complete = session.get("policy_explained", False)
+    elif session["task_id"] == "address_change_hard":
+        all_steps_complete = session.get("order_checked", False) and session.get("address_collected", False) and session.get("address_confirmed", False)
+    elif session["task_id"] == "ambiguous_request":
+        all_steps_complete = session.get("order_checked", False) and session.get("address_collected", False) and session.get("resolved", False)
+    
+    if all_steps_complete and not session["done"]:
+        session["done"] = True
+        session["perfect_completion"] = session["expert_used_count"] == 0 and session["total_reward"] >= max_score * 0.8
+    
+    score_value = min(session["total_reward"], max_score)
     
     return {
-        "session_id": session_id,
-        "task_id": session["task_id"],
+        "step": session["steps"],
+        "action": ai_action,
+        "reward": round(reward_value, 2),
+        "reward_explanation": explanation,
+        "done": session["done"],
+        "perfect_completion": session.get("perfect_completion", False),
+        "score": score_value,
+        "max_score": max_score,
+        "score_display": f"{score_value:.2f} / {max_score}",
+        "total_reward": session["total_reward"],
+        "is_valid": is_valid,
+        "used_expert": used_expert,
+        "expert_used_count": session["expert_used_count"],
         "state": {
-            "steps": session["steps"],
             "order_checked": session.get("order_checked", False),
             "address_collected": session.get("address_collected", False),
             "address_confirmed": session.get("address_confirmed", False),
-            "policy_explained": session.get("policy_explained", False),
-            "resolved": session.get("resolved", False),
-            "expert_used_count": session.get("expert_used_count", 0),
-            "total_reward": session.get("total_reward", 0.0),
-            "done": session.get("done", False)
+            "steps": session["steps"],
+            "done": session["done"]
         }
     }
 
 # =========================
-# AI MODEL CALL
+# HELPER FUNCTIONS
 # =========================
 
 def call_ai_model(task_id: str, session_state: Dict, use_expert: bool = False) -> Dict[str, Any]:
@@ -380,7 +455,7 @@ def get_task_prompt(task_id: str, session_state: Dict, use_expert: bool = False)
     )
     
     expert_section = ""
-    if use_expert:
+    if use_expert and task_id in REWARD_CONFIG:
         expert_hint = REWARD_CONFIG[task_id]["expert_hint"]
         if isinstance(expert_hint, list):
             order_checked = session_state.get("order_checked", False)
@@ -405,10 +480,6 @@ def get_task_prompt(task_id: str, session_state: Dict, use_expert: bool = False)
         return base_instructions + "Task: Handle moved address and missing package. Check order first, then address, then resolve.\nRespond in JSON."
     else:
         return base_instructions + "Return valid JSON with action_type field."
-
-# =========================
-# VALIDATION FUNCTION
-# =========================
 
 def validate_and_update_state(task_id: str, action_dict: Dict, session: Dict, used_expert: bool = False) -> tuple:
     """Validate action and update state"""
@@ -539,113 +610,23 @@ def validate_and_update_state(task_id: str, action_dict: Dict, session: Dict, us
     
     return is_valid, round(max(reward, -0.8), 2), explanation, is_valid
 
-# =========================
-# STEP AI ENDPOINT
-# =========================
-
-@app.post("/step_ai")
-def step_ai(req: StepRequest):
-    if req.session_id not in sessions:
-        raise HTTPException(404, "Invalid session_id. Please reset first.")
-
-    session = sessions[req.session_id]
-    config = REWARD_CONFIG[session["task_id"]]
-    max_score = config["max_score"]
-    max_steps_limit = MAX_STEPS[session["task_id"]]
-
-    if session["done"]:
-        return {
-            "message": "Task already completed. Please reset.",
-            "done": True,
-            "score": min(session["total_reward"], max_score),
-            "max_score": max_score,
-            "score_display": f"{min(session['total_reward'], max_score):.2f} / {max_score}",
-            "step": session["steps"],
-            "state": session.get("state", {})
-        }
-
-    env = session["env"]
-    used_expert = req.use_expert
-    
-    ai_action = call_ai_model(session["task_id"], session, used_expert)
-    
-    try:
-        action = Action(**ai_action)
-        parse_success = True
-    except Exception:
-        ai_action = {"action_type": "send_reply", "message": "I'm not sure how to help."}
-        action = Action(**ai_action)
-        parse_success = False
-    
-    is_valid, reward_value, explanation, is_perfect = validate_and_update_state(
-        session["task_id"], ai_action, session, used_expert
-    )
-    
-    if not parse_success:
-        reward_value = -0.5
-        explanation = "❌ Invalid JSON format"
-    
-    obs, env_reward, done, info = env.step(action)
-    
-    env_r = env_reward.value if hasattr(env_reward, "value") else float(env_reward)
-    reward_value = 0.7 * reward_value + 0.3 * env_r
-    
-    session["steps"] += 1
-    session["rewards"].append(reward_value)
-    session["explanations"].append(explanation)
-    session["actions_taken"].append(ai_action)
-    session["total_reward"] += reward_value
-    session["total_reward"] = min(session["total_reward"], max_score)
-    session["total_reward"] = max(session["total_reward"], 0.0)
-    
-    if used_expert:
-        session["expert_used_count"] += 1
-    
-    if session["steps"] >= max_steps_limit:
-        session["done"] = True
-        session["total_reward"] = max(0, session["total_reward"] - 0.3)
-    
-    all_steps_complete = False
-    if session["task_id"] == "order_status_easy":
-        all_steps_complete = session.get("order_checked", False)
-    elif session["task_id"] == "refund_policy_medium":
-        all_steps_complete = session.get("policy_explained", False)
-    elif session["task_id"] == "address_change_hard":
-        all_steps_complete = session.get("order_checked", False) and session.get("address_collected", False) and session.get("address_confirmed", False)
-    elif session["task_id"] == "ambiguous_request":
-        all_steps_complete = session.get("order_checked", False) and session.get("address_collected", False) and session.get("resolved", False)
-    
-    if all_steps_complete and not session["done"]:
-        session["done"] = True
-        session["perfect_completion"] = session["expert_used_count"] == 0 and session["total_reward"] >= max_score * 0.8
-    
-    score_value = min(session["total_reward"], max_score)
-    
+@app.get("/tasks")
+async def tasks():
     return {
-        "step": session["steps"],
-        "action": ai_action,
-        "reward": round(reward_value, 2),
-        "reward_explanation": explanation,
-        "done": session["done"],
-        "perfect_completion": session.get("perfect_completion", False),
-        "score": score_value,
-        "max_score": max_score,
-        "score_display": f"{score_value:.2f} / {max_score}",
-        "total_reward": session["total_reward"],
-        "is_valid": is_valid,
-        "used_expert": used_expert,
-        "expert_used_count": session["expert_used_count"],
-        "state": {
-            "order_checked": session.get("order_checked", False),
-            "address_collected": session.get("address_collected", False),
-            "address_confirmed": session.get("address_confirmed", False),
-            "steps": session["steps"],
-            "done": session["done"]
-        }
+        "tasks": [
+            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Customer wants to check their order status", "difficulty": "easy", "max_steps": 5, "max_score": 1.0},
+            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Customer wants to know the refund policy", "difficulty": "medium", "max_steps": 5, "max_score": 1.0},
+            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Customer wants to change their shipping address", "difficulty": "hard", "max_steps": 8, "max_score": 1.0},
+            {"task_id": "ambiguous_request", "name": "Moved & Missing Package", "description": "Customer issue with moved address and missing package", "difficulty": "hard+", "max_steps": 10, "max_score": 1.0}
+        ]
     }
 
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "active_sessions": len(sessions), "ai_model": MODEL_NAME if client else "fallback"}
+
 @app.get("/session/{session_id}")
-def get_session(session_id: str):
+async def get_session(session_id: str):
     if session_id not in sessions:
         raise HTTPException(404, "Session not found")
     
@@ -670,27 +651,8 @@ def get_session(session_id: str):
         "perfect_completion": session.get("perfect_completion", False)
     }
 
-@app.get("/tasks")
-def tasks():
-    return {
-        "tasks": [
-            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Customer wants to check their order status", "difficulty": "easy", "max_steps": 5, "max_score": 1.0},
-            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Customer wants to know the refund policy", "difficulty": "medium", "max_steps": 5, "max_score": 1.0},
-            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Customer wants to change their shipping address", "difficulty": "hard", "max_steps": 8, "max_score": 1.0},
-            {"task_id": "ambiguous_request", "name": "Moved & Missing Package", "description": "Customer issue with moved address and missing package", "difficulty": "hard+", "max_steps": 10, "max_score": 1.0}
-        ]
-    }
-
-@app.get("/health")
-def health():
-    return {"status": "healthy", "active_sessions": len(sessions), "ai_model": MODEL_NAME if client else "fallback"}
-
-# =========================
-# ROOT ENDPOINT
-# =========================
-
 @app.get("/", response_class=HTMLResponse)
-def home():
+async def home():
     return """
     <!DOCTYPE html>
     <html>
@@ -703,6 +665,7 @@ def home():
             h1 { color: #8b5cf6; }
             code { background: #1a1a2a; padding: 2px 5px; border-radius: 3px; }
             pre { background: #1a1a2a; padding: 10px; border-radius: 5px; overflow-x: auto; }
+            .endpoint { margin: 10px 0; }
         </style>
     </head>
     <body>
@@ -711,6 +674,7 @@ def home():
             <div class="card">
                 <h2>OpenEnv Compliant Environment</h2>
                 <p>A realistic customer support simulation for training AI agents.</p>
+                
                 <h3>Available Tasks:</h3>
                 <ul>
                     <li><strong>order_status_easy</strong> - Check order status (Easy)</li>
@@ -719,14 +683,29 @@ def home():
                     <li><strong>ambiguous_request</strong> - Handle moved address + missing package (Hard+)</li>
                 </ul>
             </div>
+            
             <div class="card">
-                <h2>API Endpoints</h2>
+                <h2>OpenEnv API Endpoints</h2>
+                <div class="endpoint"><code>POST /openenv/reset</code> - Reset environment</div>
+                <div class="endpoint"><code>POST /openenv/step</code> - Take an action</div>
+                <div class="endpoint"><code>GET /openenv/state</code> - Get current state</div>
+                <div class="endpoint"><code>GET /openenv/tasks</code> - List tasks</div>
+                <div class="endpoint"><code>GET /openenv/validate</code> - Validate OpenEnv compliance</div>
+            </div>
+            
+            <div class="card">
+                <h2>Quick Start</h2>
                 <pre>
-POST   /openenv/reset     - Reset environment
-POST   /openenv/step      - Take an action
-GET    /openenv/state     - Get current state
-GET    /openenv/tasks     - List tasks
-GET    /openenv/validate  - Validate OpenEnv compliance
+import requests
+
+# Reset environment
+resp = requests.post("https://your-space.hf.space/openenv/reset")
+session = resp.json()
+
+# Take a step
+action = {"action_type": "lookup_order", "order_id": "12345"}
+resp = requests.post("https://your-space.hf.space/openenv/step", json=action)
+result = resp.json()
                 </pre>
             </div>
         </div>
