@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 from typing import Optional
 
 from app.env import CustomerSupportEnv
@@ -6,23 +6,17 @@ from app.models import Action
 
 app = FastAPI()
 
-# =========================
-# GLOBAL ENV
-# =========================
-
 env: Optional[CustomerSupportEnv] = None
 
 # =========================
-# RESET ENDPOINT (NO BODY)
+# RESET ENDPOINT
 # =========================
 
 @app.post("/openenv/reset")
 def reset_env(request: dict = Body(default=None)):
     global env
 
-    # Ignore request completely
     env = CustomerSupportEnv(task_id="order_status_easy")
-
     obs = env.reset()
 
     return {
@@ -31,6 +25,7 @@ def reset_env(request: dict = Body(default=None)):
         "done": obs.done,
         "observation_text": obs.observation_text
     }
+
 # =========================
 # STEP ENDPOINT
 # =========================
