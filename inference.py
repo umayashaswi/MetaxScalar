@@ -1,23 +1,10 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional
 
 from app.env import CustomerSupportEnv
+from app.models import Action
 
 app = FastAPI()
-
-# =========================
-# MODELS
-# =========================
-
-class Action(BaseModel):
-    action_type: str
-    order_id: Optional[str] = None
-    message: Optional[str] = None
-
-class ResetRequest(BaseModel):
-    # FIX: Made task_id optional to prevent 422 Validation Errors on empty requests
-    task_id: Optional[str] = None
 
 # =========================
 # GLOBAL ENV
@@ -26,18 +13,29 @@ class ResetRequest(BaseModel):
 env: Optional[CustomerSupportEnv] = None
 
 # =========================
-# ENDPOINTS
+# RESET ENDPOINT (NO BODY)
 # =========================
 
 @app.post("/openenv/reset")
-def reset_env(request: ResetRequest):
+def reset_env():
     global env
-    
-    # FIX: Assign a fallback if the platform sends an empty body
-    assigned_task = request.task_id if request.task_id else "default_task"
-    
-    env = CustomerSupportEnv(task_id=assigned_task)
-    return env.reset()
+
+    # Always start with a valid default task
+    env = CustomerSupportEnv(task_id="order_status_easy")
+
+    obs = env.reset()
+
+    # Return plain JSON (not Pydantic object)
+    return {
+        "task_id": obs.task_id,
+        "history": obs.history,
+        "done": obs.done,
+        "observation_text": obs.observation_text
+    }
+
+# =========================
+# STEP ENDPOINT
+# =========================
 
 @app.post("/openenv/step")
 def step_env(action: Action):
@@ -49,11 +47,20 @@ def step_env(action: Action):
     obs, reward, done, info = env.step(action)
 
     return {
-        "observation": obs,
-        "reward": reward,
+        "observation": {
+            "task_id": obs.task_id,
+            "history": obs.history,
+            "done": obs.done,
+            "observation_text": obs.observation_text
+        },
+        "reward": reward.value,
         "done": done,
         "info": info
     }
+
+# =========================
+# VALIDATE ENDPOINT
+# =========================
 
 @app.get("/openenv/validate")
 def validate():
