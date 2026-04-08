@@ -54,7 +54,7 @@ class StepRequest(BaseModel):
 class ResetRequest(BaseModel):
     task_id: str
 
-class Action(BaseModel):
+class ActionModel(BaseModel):
     action_type: str
     order_id: str = None
     message: str = None
@@ -492,47 +492,71 @@ def validate_and_update_state(task_id: str, action_dict: Dict, session: Dict, us
     return is_valid, round(reward, 2), explanation, is_valid
 
 # =========================
-# OPENENV COMPATIBILITY ENDPOINTS (IMPORTANT)
+# OPENENV COMPATIBILITY ENDPOINTS (FIXED)
 # =========================
 
 @app.post("/openenv/reset")
-def openenv_reset():
-    # Create env with default task
-    env = CustomerSupportEnv(task_id="order_status_easy")
+def openenv_reset(request: dict = Body(default=None)):
+    """OpenEnv compatible reset endpoint - accepts optional body"""
+    task_id = request.get("task_id", "order_status_easy") if request else "order_status_easy"
+    env = CustomerSupportEnv(task_id)
     obs = env.reset()
-
+    
+    # Store in sessions for compatibility
+    session_id = str(uuid.uuid4())
+    sessions[session_id] = {
+        "env": env,
+        "task_id": task_id,
+        "steps": 0,
+        "rewards": [],
+        "done": False,
+        "total_reward": 0.0,
+        "history": []
+    }
+    
     return {
         "task_id": obs.task_id,
         "history": obs.history,
         "done": obs.done,
-        "observation_text": obs.observation_text
+        "observation_text": getattr(obs, "observation_text", None)
     }
 
-
 @app.post("/openenv/step")
-def openenv_step(action: Action):
-    env = CustomerSupportEnv(task_id="order_status_easy")
-    obs = env.reset()
-
+def openenv_step(action: ActionModel):
+    """OpenEnv compatible step endpoint"""
+    # Find the most recent session
+    if not sessions:
+        return {"error": "Environment not initialized. Call /openenv/reset first."}
+    
+    session_id = list(sessions.keys())[-1]
+    session = sessions[session_id]
+    env = session["env"]
+    
     obs, reward, done, info = env.step(action)
-
+    
+    # Update session
+    session["steps"] += 1
+    session["rewards"].append(reward.value)
+    session["total_reward"] += reward.value
+    session["done"] = done
+    session["history"].append(action.dict())
+    
     return {
         "observation": {
             "task_id": obs.task_id,
             "history": obs.history,
             "done": obs.done,
-            "observation_text": obs.observation_text
+            "observation_text": getattr(obs, "observation_text", None)
         },
         "reward": reward.value,
         "done": done,
         "info": info
     }
 
-
 @app.get("/openenv/validate")
 def openenv_validate():
-    return {"status": "ok"}
-
+    """OpenEnv validation endpoint"""
+    return {"status": "ok", "ready": True}
 
 # =========================
 # RESET - WITH DYNAMIC STATE
@@ -664,11 +688,11 @@ def step_ai(req: StepRequest):
     ai_action = call_ai_model(session["task_id"], session, used_expert)
     
     try:
-        action = Action(**ai_action)
+        action = ActionModel(**ai_action)
         parse_success = True
     except Exception:
         ai_action = {"action_type": "send_reply", "message": "I'm not sure how to help. Could you clarify?"}
-        action = Action(**ai_action)
+        action = ActionModel(**ai_action)
         parse_success = False
     
     is_valid, reward_value, explanation, is_perfect = validate_and_update_state(
