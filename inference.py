@@ -17,22 +17,20 @@ env: Optional[CustomerSupportEnv] = None
 # =========================
 
 @app.post("/openenv/reset")
-def reset_env():
+def reset_env(request: dict = Body(default=None)):
     global env
 
-    # Always start with a valid default task
+    # Ignore request completely
     env = CustomerSupportEnv(task_id="order_status_easy")
 
     obs = env.reset()
 
-    # Return plain JSON (not Pydantic object)
     return {
         "task_id": obs.task_id,
         "history": obs.history,
         "done": obs.done,
         "observation_text": obs.observation_text
     }
-
 # =========================
 # STEP ENDPOINT
 # =========================
