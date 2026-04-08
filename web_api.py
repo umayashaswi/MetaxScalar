@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+import random
 from typing import Dict, Any, List
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -53,184 +54,220 @@ class StepRequest(BaseModel):
 class ResetRequest(BaseModel):
     task_id: str
 
+class Action(BaseModel):
+    action_type: str
+    order_id: str = None
+    message: str = None
+
 # =========================
-# REWARD CONFIGURATION
+# MAX STEPS CONFIGURATION
+# =========================
+
+MAX_STEPS = {
+    "order_status_easy": 5,
+    "refund_policy_medium": 5,
+    "address_change_hard": 8,
+    "ambiguous_request": 10
+}
+
+# =========================
+# AMBIGUOUS QUERIES (Randomized)
+# =========================
+
+AMBIGUOUS_QUERIES = [
+    "I moved and didn't get my package",
+    "My order didn't arrive after I changed address",
+    "Package missing after relocation",
+    "I think it was delivered to my old address",
+    "I changed my address but my order went to the old one",
+    "Moved houses last month, order still hasn't arrived"
+]
+
+# =========================
+# REWARD CONFIGURATION (UPDATED WITH STRICT HINTS)
 # =========================
 
 REWARD_CONFIG = {
     "order_status_easy": {
-        "correct_step": 1.0,
-        "wrong_action": -0.3,
-        "ask_expert_penalty": -0.2,
         "max_score": 1.0,
-        "expert_hint": '{"action_type": "lookup_order", "order_id": "12345"}',
-        "correct_action": {"action_type": "lookup_order", "order_id": "12345"}
+        "expert_hint": "Use exactly: {'action_type': 'lookup_order', 'order_id': '12345'}"
     },
     "refund_policy_medium": {
-        "correct_step": 1.0,
-        "wrong_action": -0.3,
-        "ask_expert_penalty": -0.2,
         "max_score": 1.0,
-        "expert_hint": '{"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}',
-        "correct_action": {"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}
+        "expert_hint": "Use 'send_reply' and explain that we offer a 30-day full refund policy. Include the word 'refund'."
     },
     "address_change_hard": {
-        "step1_correct": 0.4,
-        "step2_correct": 0.3,
-        "step3_correct": 0.3,
-        "wrong_action": -0.3,
-        "ask_expert_penalty": -0.2,
         "max_score": 1.0,
-        "expert_hint": {
-            1: '{"action_type": "lookup_order", "order_id": "12345"}',
-            2: '{"action_type": "send_reply", "message": "Please provide your new address."}',
-            3: '{"action_type": "send_reply", "message": "Please confirm your new address."}'
-        },
-        "correct_actions": {
-            1: {"action_type": "lookup_order", "order_id": "12345"},
-            2: {"action_type": "send_reply", "message": "Please provide your new address."},
-            3: {"action_type": "send_reply", "message": "Please confirm your new address."}
-        }
+        "expert_hint": [
+            "Step 1: Use {'action_type': 'lookup_order', 'order_id': '12345'}. DO NOT reply yet.",
+            "Step 2: Order is FOUND. DO NOT use lookup_order again. Use {'action_type': 'send_reply', 'message': 'Please provide your new address.'}",
+            "Step 3: Address received. Use {'action_type': 'send_reply', 'message': 'Please confirm this address.'}"
+        ]
     },
     "ambiguous_request": {
-        "step1_correct": 0.3,
-        "step2_correct": 0.35,
-        "step3_correct": 0.35,
-        "wrong_action": -0.3,
-        "ask_expert_penalty": -0.2,
         "max_score": 1.0,
-        "user_input": "I didn't receive my order and I recently changed my address.",
-        "expert_hint": {
-            1: '{"action_type": "lookup_order", "order_id": "12345"} - First check the order status',
-            2: '{"action_type": "send_reply", "message": "I see you changed your address. Please confirm your new address so I can update our records and check your order."} - Ask for address confirmation',
-            3: '{"action_type": "send_reply", "message": "Thank you for confirming. I will update your address and investigate your missing order. A replacement will be sent to your new address within 3-5 business days."} - Resolve both issues'
-        },
-        "correct_actions": {
-            1: {"action_type": "lookup_order", "order_id": "12345"},
-            2: {"action_type": "send_reply", "message": "I see you changed your address. Please confirm your new address so I can update our records and check your order."},
-            3: {"action_type": "send_reply", "message": "Thank you for confirming. I will update your address and investigate your missing order. A replacement will be sent to your new address within 3-5 business days."}
-        }
+        "expert_hint": [
+            "Step 1: You must check the package location first. Use {'action_type': 'lookup_order', 'order_id': '12345'}.",
+            "Step 2: Order shows 'Returned to Sender'. Use {'action_type': 'send_reply', 'message': 'I see you moved. Can you confirm your new address?'}",
+            "Step 3: Address confirmed. Resolve the issue: {'action_type': 'send_reply', 'message': 'I have updated your address and a replacement is on the way.'}"
+        ]
     }
 }
 
 # =========================
-# TASK-SPECIFIC PROMPTS
+# IMPROVED TASK-SPECIFIC PROMPTS WITH STRICT RULES
 # =========================
 
-def get_task_prompt(task_id: str, step_num: int, history: List, use_expert: bool = False) -> str:
+def get_task_prompt(task_id: str, session_state: Dict, use_expert: bool = False) -> str:
+    """Natural language prompts with strict action restrictions"""
+    
+    base_instructions = (
+        "### STRICT RULES ###\n"
+        "1. You have ONLY TWO tools: 'lookup_order' and 'send_reply'.\n"
+        "2. If you need to talk to the user, ask a question, or give info, you MUST use 'send_reply'.\n"
+        "3. NEVER invent action_types like 'ask_address' or 'confirm_order'.\n"
+        "4. Your output must be PURE JSON.\n\n"
+    )
+    
+    expert_section = ""
+    if use_expert:
+        expert_hint = REWARD_CONFIG[task_id]["expert_hint"]
+        if isinstance(expert_hint, list):
+            order_checked = session_state.get("order_checked", False)
+            address_collected = session_state.get("address_collected", False)
+            if not order_checked:
+                hint = expert_hint[0]
+            elif not address_collected:
+                hint = expert_hint[1]
+            else:
+                hint = expert_hint[2]
+        else:
+            hint = expert_hint
+        expert_section = f"\n\n🚨 EXPERT COMMAND: {hint}\n"
+    
     if task_id == "order_status_easy":
-        base = (
-            "You are a Customer Support AI. The customer wants to check their order status.\n\n"
-            "You MUST respond with EXACTLY this JSON:\n"
-            '{"action_type": "lookup_order", "order_id": "12345"}\n\n'
-            "DO NOT use any other action_type. DO NOT send replies. DO NOT ask questions.\n"
-            "Only respond with the JSON above."
+        return (
+            base_instructions +
+            "You are a customer support assistant helping a customer check their order status.\n\n"
+            "Think before acting:\n"
+            "- What is the quickest way to find the order status?\n"
+            "- Avoid unnecessary conversation\n\n"
+            "Respond ONLY in JSON with fields: action_type, order_id (if needed), message (if needed)."
+            f"{expert_section}"
         )
-        if use_expert:
-            base += f"\n\n🎓 EXPERT ADVICE: Use exactly: {REWARD_CONFIG[task_id]['expert_hint']}"
-        return base
     
     elif task_id == "refund_policy_medium":
-        base = (
-            "You are a Customer Support AI. The customer wants to know the refund policy.\n\n"
-            "You MUST respond with EXACTLY this JSON:\n"
-            '{"action_type": "send_reply", "message": "Our refund policy allows returns within 30 days for a full refund."}\n\n'
-            "Your message MUST include the word 'refund'.\n"
-            "Only respond with the JSON above."
+        return (
+            base_instructions +
+            "You are a customer support assistant explaining a refund policy.\n\n"
+            "Think before acting:\n"
+            "- The user wants information, not an action on their order\n"
+            "- Provide a clear and helpful explanation\n\n"
+            "Respond ONLY in JSON with fields: action_type, order_id (if needed), message (if needed)."
+            f"{expert_section}"
         )
-        if use_expert:
-            base += f"\n\n🎓 EXPERT ADVICE: Use exactly: {REWARD_CONFIG[task_id]['expert_hint']}"
-        return base
     
     elif task_id == "address_change_hard":
-        if step_num == 1:
-            step_desc = "STEP 1: First, you need to locate the customer's order."
-            correct_action = '{"action_type": "lookup_order", "order_id": "12345"}'
-        elif step_num == 2:
-            step_desc = "STEP 2: Now ask the customer for their new address."
-            correct_action = '{"action_type": "send_reply", "message": "Please provide your new address."}'
-        elif step_num == 3:
-            step_desc = "STEP 3: Finally, ask the customer to confirm the new address."
-            correct_action = '{"action_type": "send_reply", "message": "Please confirm your new address."}'
-        else:
-            step_desc = "Complete the address change process."
-            correct_action = '{"action_type": "send_reply", "message": "Address updated successfully."}'
+        order_checked = session_state.get("order_checked", False)
+        address_collected = session_state.get("address_collected", False)
+        address_confirmed = session_state.get("address_confirmed", False)
         
-        base = (
-            f"You are a Customer Support AI handling address changes.\n\n"
-            f"{step_desc}\n\n"
-            f"You MUST respond with EXACTLY this JSON:\n{correct_action}\n\n"
-            "Only respond with the JSON above. No extra text."
+        state_hint = ""
+        if not order_checked:
+            state_hint = "\nCurrent status: Need to locate the order first."
+        elif not address_collected:
+            state_hint = "\nCurrent status: Order located. Now need the new address."
+        elif not address_confirmed:
+            state_hint = "\nCurrent status: Address received. Need confirmation."
+        else:
+            state_hint = "\nCurrent status: All steps complete."
+        
+        if order_checked:
+            base_instructions += "⚠️ ALERT: Order is already checked. 'lookup_order' is now FORBIDDEN. Use 'send_reply'.\n"
+        
+        return (
+            base_instructions +
+            "You are a customer support assistant helping a user change their shipping address.\n\n"
+            "Think step-by-step:\n"
+            "- Identify what information is needed before making changes\n"
+            "- Gather required details before confirming anything\n"
+            "- Ensure actions follow a logical sequence\n\n"
+            "Important:\n"
+            "- Do not confirm address before asking for it\n"
+            "- Avoid repeating the same action\n\n"
+            f"{state_hint}\n\n"
+            "Respond ONLY in JSON with fields: action_type, order_id (if needed), message (if needed)."
+            f"{expert_section}"
         )
-        if use_expert:
-            base += f"\n\n🎓 EXPERT ADVICE: Use exactly: {REWARD_CONFIG[task_id]['expert_hint'].get(step_num, correct_action)}"
-        return base
     
     elif task_id == "ambiguous_request":
-        user_input = REWARD_CONFIG[task_id]["user_input"]
+        user_prompt = session_state.get("user_prompt", "I moved recently and didn't receive my package.")
+        order_checked = session_state.get("order_checked", False)
+        address_collected = session_state.get("address_collected", False)
+        resolved = session_state.get("resolved", False)
         
-        if step_num == 1:
-            step_desc = "STEP 1: The customer says: '" + user_input + "' First, check their order status."
-            correct_action = REWARD_CONFIG[task_id]["correct_actions"][1]
-        elif step_num == 2:
-            step_desc = "STEP 2: Now ask the customer to confirm their new address to handle both issues."
-            correct_action = REWARD_CONFIG[task_id]["correct_actions"][2]
-        elif step_num == 3:
-            step_desc = "STEP 3: Confirm the address update and resolve the missing order issue."
-            correct_action = REWARD_CONFIG[task_id]["correct_actions"][3]
+        state_hint = ""
+        if not order_checked:
+            state_hint = "\nCurrent status: Need to check the order status first."
+        elif not address_collected:
+            state_hint = "\nCurrent status: Order checked. Need to confirm new address."
+        elif not resolved:
+            state_hint = "\nCurrent status: Address confirmed. Need to resolve the issue."
         else:
-            step_desc = "Complete the customer support process."
-            correct_action = {"action_type": "send_reply", "message": "Your issues have been resolved."}
+            state_hint = "\nCurrent status: Issue resolved."
         
-        base = (
-            f"You are a Customer Support AI handling complex customer issues.\n\n"
-            f"{step_desc}\n\n"
-            f"You MUST respond with EXACTLY this JSON:\n{json.dumps(correct_action)}\n\n"
-            "Only respond with the JSON above. No extra text."
+        if order_checked:
+            base_instructions += "⚠️ ALERT: Order is already checked. 'lookup_order' is now FORBIDDEN. Use 'send_reply'.\n"
+        
+        return (
+            base_instructions +
+            f"You are a customer support assistant handling a complex issue:\n"
+            f"The customer says: \"{user_prompt}\"\n\n"
+            "Think carefully step-by-step:\n"
+            "- Identify all issues in the request (address change and missing delivery)\n"
+            "- Gather missing information before confirming anything\n"
+            "- Resolve the issue logically and completely\n\n"
+            "Important guidelines:\n"
+            "- Do not confirm address before asking for it\n"
+            "- Avoid repeating the same action multiple times\n"
+            "- Ensure your response addresses both the address issue and delivery issue\n\n"
+            f"{state_hint}\n\n"
+            "Respond ONLY in JSON with fields: action_type, order_id (if needed), message (if needed)."
+            f"{expert_section}"
         )
-        if use_expert:
-            base += f"\n\n🎓 EXPERT ADVICE: Use exactly: {REWARD_CONFIG[task_id]['expert_hint'].get(step_num, correct_action)}"
-        return base
     
     else:
         return "Return valid JSON with action_type field."
 
-def get_step_default_action(task_id: str, step_num: int) -> Dict[str, Any]:
-    """Fallback action if AI fails"""
-    config = REWARD_CONFIG[task_id]
-    if task_id in ["address_change_hard", "ambiguous_request"]:
-        return config["correct_actions"].get(step_num, {"action_type": "send_reply", "message": "OK"})
-    else:
-        return config["correct_action"]
+# =========================
+# AI MODEL CALL
+# =========================
 
-def call_ai_model(task_id: str, step_num: int, history: List, use_expert: bool = False) -> Dict[str, Any]:
+def call_ai_model(task_id: str, session_state: Dict, use_expert: bool = False) -> Dict[str, Any]:
     """Call the AI model to get an action"""
     
-    # If expert is requested, return the correct action directly
-    if use_expert:
-        print(f"🎓 Expert advice requested for {task_id} step {step_num}")
-        if task_id in ["address_change_hard", "ambiguous_request"]:
-            return REWARD_CONFIG[task_id]["correct_actions"].get(step_num, get_step_default_action(task_id, step_num))
-        else:
-            return REWARD_CONFIG[task_id]["correct_action"]
-    
     if client is None:
-        return get_step_default_action(task_id, step_num)
+        return {"action_type": "send_reply", "message": "I apologize, but I'm having trouble processing your request. Could you please rephrase?"}
     
-    sys_prompt = get_task_prompt(task_id, step_num, history, use_expert)
+    sys_prompt = get_task_prompt(task_id, session_state, use_expert)
+    
+    state_summary = {k: v for k, v in session_state.items() 
+                     if k in ['order_checked', 'address_collected', 'address_confirmed', 'policy_explained', 'resolved']}
     
     try:
-        print(f"🤖 Calling AI model for {task_id} step {step_num}...")
+        print(f"🤖 Calling AI model for {task_id}...")
+        print(f"📊 Current state: {state_summary}")
+        
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": sys_prompt},
                 {
                     "role": "user",
-                    "content": f"Task: {task_id}\nStep: {step_num}\nHistory: {json.dumps(history)}\nReturn ONLY valid JSON with action_type field."
+                    "content": f"Task: {task_id}\nCurrent state: {json.dumps(state_summary)}\nReturn ONLY valid JSON with action_type field."
                 }
             ],
-            temperature=0.1,
+            temperature=0.2,
             max_tokens=150
         )
 
@@ -250,117 +287,255 @@ def call_ai_model(task_id: str, step_num: int, history: List, use_expert: bool =
         if start != -1 and end != 0:
             content = content[start:end]
         else:
-            return get_step_default_action(task_id, step_num)
+            return {"action_type": "send_reply", "message": "I'm not sure how to help. Could you clarify?"}
 
         data = json.loads(content)
         
         if "action_type" not in data:
-            return get_step_default_action(task_id, step_num)
+            return {"action_type": "send_reply", "message": "Let me try to help you with that."}
         
-        # Fix common issues
-        if data["action_type"] == "lookup_order" and "order_id" not in data:
-            data["order_id"] = "12345"
+        if data["action_type"] not in ["lookup_order", "send_reply"]:
+            data["action_type"] = "send_reply"
+            data["message"] = "I understand your concern. Let me help you with that."
         
         return data
         
     except Exception as e:
         print(f"❌ AI model error: {e}")
-        return get_step_default_action(task_id, step_num)
+        return {"action_type": "send_reply", "message": "I encountered an error. Could you please try again?"}
 
 # =========================
-# ACTION VALIDATION
+# VALIDATION WITH STATE TRACKING AND STRONGER PENALTIES
 # =========================
 
-def validate_action(task_id: str, step: int, action_dict: Dict, used_expert: bool = False) -> tuple:
-    """Validate action and return (is_valid, reward, explanation, expected_action, is_perfect)"""
+def validate_and_update_state(task_id: str, action_dict: Dict, session: Dict, used_expert: bool = False) -> tuple:
+    """Validate action and update state with appropriate rewards and stronger penalties"""
     
-    config = REWARD_CONFIG[task_id]
-    expert_penalty = config["ask_expert_penalty"] if used_expert else 0
+    action_type = action_dict.get("action_type", "")
+    expert_penalty = -0.2 if used_expert else 0
+    message = action_dict.get("message", "").lower()
+    
+    reward = 0.0
+    explanation = ""
+    is_valid = False
+    
+    last_action = session.get("last_action_type", None)
     
     # Order Status Easy Task
     if task_id == "order_status_easy":
-        expected = config["correct_action"]
-        if action_dict.get("action_type") == expected["action_type"] and action_dict.get("order_id") == expected["order_id"]:
-            reward = config["correct_step"] + expert_penalty
-            is_perfect = not used_expert and reward >= config["correct_step"]
-            return True, round(max(0, reward), 2), "✅ Correct: Order lookup successful", "lookup_order with order_id 12345", is_perfect
+        order_checked = session.get("order_checked", False)
+        
+        if not order_checked:
+            if action_type == "lookup_order":
+                reward = 0.8 + expert_penalty
+                explanation = "✅ Correct: Order lookup successful"
+                is_valid = True
+                session["order_checked"] = True
+            else:
+                reward = -0.5 + expert_penalty
+                explanation = f"❌ CRITICAL: You cannot help the user without looking up the order first. Got {action_type}"
+                is_valid = False
         else:
-            return False, config["wrong_action"], "❌ Wrong action. Expected: lookup_order with order_id 12345", "lookup_order with order_id 12345", False
+            if action_type == "send_reply":
+                reward = 0.2 + expert_penalty
+                explanation = "✅ Task complete"
+                is_valid = True
+            else:
+                reward = -0.3 + expert_penalty
+                explanation = "❌ Already checked order, should send reply"
+                is_valid = False
     
     # Refund Policy Medium Task
-    if task_id == "refund_policy_medium":
-        expected = config["correct_action"]
-        if action_dict.get("action_type") == expected["action_type"] and "refund" in action_dict.get("message", "").lower():
-            reward = config["correct_step"] + expert_penalty
-            is_perfect = not used_expert and reward >= config["correct_step"]
-            return True, round(max(0, reward), 2), "✅ Correct: Refund policy explained", "send_reply with 'refund'", is_perfect
+    elif task_id == "refund_policy_medium":
+        policy_explained = session.get("policy_explained", False)
+        
+        if not policy_explained:
+            if action_type == "send_reply":
+                if "refund" in message:
+                    reward = 0.8 + expert_penalty
+                    explanation = "✅ Correct: Refund policy explained"
+                    is_valid = True
+                    session["policy_explained"] = True
+                else:
+                    reward = 0.1 + expert_penalty
+                    explanation = "⚠️ Sent reply but missing 'refund' keyword"
+                    is_valid = False
+            else:
+                reward = -0.4 + expert_penalty
+                explanation = f"❌ Wrong: Should send reply, got {action_type}"
+                is_valid = False
         else:
-            return False, config["wrong_action"], "❌ Wrong action. Expected a reply explaining the refund policy with 'refund'", "send_reply with refund policy", False
+            reward = 0.1 + expert_penalty
+            explanation = "✅ Task already complete"
+            is_valid = True
     
     # Address Change Hard Task
-    if task_id == "address_change_hard":
-        expected = config["correct_actions"].get(step)
-        if not expected:
-            return False, config["wrong_action"], "❌ Invalid step", "correct action for this step", False
+    elif task_id == "address_change_hard":
+        order_checked = session.get("order_checked", False)
+        address_collected = session.get("address_collected", False)
+        address_confirmed = session.get("address_confirmed", False)
         
-        if step == 1:
-            if action_dict.get("action_type") == expected["action_type"] and action_dict.get("order_id") == expected["order_id"]:
-                reward = config["step1_correct"] + expert_penalty
-                is_perfect = not used_expert and reward >= config["step1_correct"]
-                return True, round(max(0, reward), 2), "✅ Step 1/3: Order located", "lookup_order with order_id 12345", is_perfect
-            else:
-                return False, config["wrong_action"], "❌ Step 1: Expected lookup_order with order_id 12345", "lookup_order with order_id 12345", False
+        if not address_collected and "confirm" in message:
+            reward = -0.6 + expert_penalty
+            explanation = "❌ INVALID: Cannot confirm address before asking for it!"
+            is_valid = False
+            session["last_action_type"] = action_type
+            return is_valid, round(max(reward, -0.8), 2), explanation, is_valid
         
-        elif step == 2:
-            if action_dict.get("action_type") == expected["action_type"] and "address" in action_dict.get("message", "").lower():
-                reward = config["step2_correct"] + expert_penalty
-                is_perfect = not used_expert and reward >= config["step2_correct"]
-                return True, round(max(0, reward), 2), "✅ Step 2/3: Address requested", "send_reply asking for new address", is_perfect
-            else:
-                return False, config["wrong_action"], "❌ Step 2: Ask customer for their new address", "send_reply asking for new address", False
+        if not order_checked and action_type == "send_reply" and "address" in message:
+            reward = -0.5 + expert_penalty
+            explanation = "❌ INVALID: Must lookup order before asking for address!"
+            is_valid = False
+            session["last_action_type"] = action_type
+            return is_valid, round(max(reward, -0.8), 2), explanation, is_valid
         
-        elif step == 3:
-            if action_dict.get("action_type") == expected["action_type"] and "confirm" in action_dict.get("message", "").lower():
-                reward = config["step3_correct"] + expert_penalty
-                is_perfect = not used_expert and reward >= config["step3_correct"]
-                return True, round(max(0, reward), 2), "✅ Step 3/3: Address confirmed", "send_reply asking for confirmation", is_perfect
+        if not order_checked:
+            if action_type == "lookup_order":
+                reward = 0.5 + expert_penalty
+                explanation = "✅ Step 1: Order located"
+                is_valid = True
+                session["order_checked"] = True
             else:
-                return False, config["wrong_action"], "❌ Step 3: Ask customer to confirm the new address", "send_reply asking for confirmation", False
+                reward = -0.5 + expert_penalty
+                explanation = f"❌ CRITICAL: You cannot help the user without looking up the order first. Got {action_type}"
+                is_valid = False
+        elif not address_collected:
+            if action_type == "send_reply" and "address" in message:
+                reward = 0.4 + expert_penalty
+                explanation = "✅ Step 2: Address requested"
+                is_valid = True
+                session["address_collected"] = True
+            else:
+                reward = -0.4 + expert_penalty
+                explanation = "❌ Step 2: Should ask for new address"
+                is_valid = False
+        elif not address_confirmed:
+            if action_type == "send_reply" and "confirm" in message:
+                reward = 0.4 + expert_penalty
+                explanation = "✅ Step 3: Address confirmed"
+                is_valid = True
+                session["address_confirmed"] = True
+            else:
+                reward = -0.4 + expert_penalty
+                explanation = "❌ Step 3: Should ask for confirmation"
+                is_valid = False
+        else:
+            reward = 0.1 + expert_penalty
+            explanation = "✅ Task already complete"
+            is_valid = True
+        
+        if last_action == action_type and reward < 0:
+            reward -= 0.3
+            explanation += " (Repeated same mistake - penalty increased!)"
     
-    # Ambiguous Request Task (New)
-    if task_id == "ambiguous_request":
-        expected = config["correct_actions"].get(step)
-        if not expected:
-            return False, config["wrong_action"], "❌ Invalid step", "correct action for this step", False
+    # Ambiguous Request Task
+    elif task_id == "ambiguous_request":
+        order_checked = session.get("order_checked", False)
+        address_collected = session.get("address_collected", False)
+        resolved = session.get("resolved", False)
         
-        if step == 1:
-            if action_dict.get("action_type") == expected["action_type"] and action_dict.get("order_id") == expected["order_id"]:
-                reward = config["step1_correct"] + expert_penalty
-                is_perfect = not used_expert and reward >= config["step1_correct"]
-                return True, round(max(0, reward), 2), "✅ Step 1/3: Order located", "lookup_order with order_id 12345", is_perfect
-            else:
-                return False, config["wrong_action"], "❌ Step 1: First check the order status", "lookup_order with order_id 12345", False
+        if not address_collected and "confirm" in message:
+            reward = -0.6 + expert_penalty
+            explanation = "❌ INVALID: Cannot confirm address before asking for it!"
+            is_valid = False
+            session["last_action_type"] = action_type
+            return is_valid, round(max(reward, -0.8), 2), explanation, is_valid
         
-        elif step == 2:
-            if action_dict.get("action_type") == expected["action_type"] and "address" in action_dict.get("message", "").lower():
-                reward = config["step2_correct"] + expert_penalty
-                is_perfect = not used_expert and reward >= config["step2_correct"]
-                return True, round(max(0, reward), 2), "✅ Step 2/3: Address confirmation requested", "send_reply asking for address confirmation", is_perfect
-            else:
-                return False, config["wrong_action"], "❌ Step 2: Ask customer to confirm their new address", "send_reply asking for address confirmation", False
+        if not order_checked and action_type == "send_reply":
+            reward = -0.5 + expert_penalty
+            explanation = "❌ INVALID: Must check order status first!"
+            is_valid = False
+            session["last_action_type"] = action_type
+            return is_valid, round(max(reward, -0.8), 2), explanation, is_valid
         
-        elif step == 3:
-            if action_dict.get("action_type") == expected["action_type"]:
-                reward = config["step3_correct"] + expert_penalty
-                is_perfect = not used_expert and reward >= config["step3_correct"]
-                return True, round(max(0, reward), 2), "✅ Step 3/3: Both issues resolved", "send_reply resolving both issues", is_perfect
+        if not order_checked:
+            if action_type == "lookup_order":
+                reward = 0.4 + expert_penalty
+                explanation = "✅ Step 1: Order located"
+                is_valid = True
+                session["order_checked"] = True
             else:
-                return False, config["wrong_action"], "❌ Step 3: Confirm address update and resolve missing order", "send_reply resolving both issues", False
+                reward = -0.5 + expert_penalty
+                explanation = f"❌ CRITICAL: You must check the order status first. Got {action_type}"
+                is_valid = False
+        elif not address_collected:
+            if action_type == "send_reply" and "address" in message:
+                reward = 0.4 + expert_penalty
+                explanation = "✅ Step 2: Address confirmation requested"
+                is_valid = True
+                session["address_collected"] = True
+            else:
+                reward = -0.4 + expert_penalty
+                explanation = "❌ Step 2: Should ask for address confirmation"
+                is_valid = False
+        elif not resolved:
+            if action_type == "send_reply":
+                reward = 0.4 + expert_penalty
+                explanation = "✅ Step 3: Issue resolved"
+                is_valid = True
+                session["resolved"] = True
+            else:
+                reward = -0.4 + expert_penalty
+                explanation = f"❌ Step 3: Should send resolution, got {action_type}"
+                is_valid = False
+        else:
+            reward = 0.1 + expert_penalty
+            explanation = "✅ Task already complete"
+            is_valid = True
+        
+        if last_action == action_type and reward < 0:
+            reward -= 0.3
+            explanation += " (Repeated same mistake - penalty increased!)"
     
-    return False, -0.3, "❌ Invalid action format", "valid JSON", False
+    session["last_action_type"] = action_type
+    reward = max(reward, -0.8)
+    return is_valid, round(reward, 2), explanation, is_valid
 
 # =========================
-# RESET
+# OPENENV COMPATIBILITY ENDPOINTS (IMPORTANT)
+# =========================
+
+@app.post("/openenv/reset")
+def openenv_reset():
+    # Create env with default task
+    env = CustomerSupportEnv(task_id="order_status_easy")
+    obs = env.reset()
+
+    return {
+        "task_id": obs.task_id,
+        "history": obs.history,
+        "done": obs.done,
+        "observation_text": obs.observation_text
+    }
+
+
+@app.post("/openenv/step")
+def openenv_step(action: Action):
+    env = CustomerSupportEnv(task_id="order_status_easy")
+    obs = env.reset()
+
+    obs, reward, done, info = env.step(action)
+
+    return {
+        "observation": {
+            "task_id": obs.task_id,
+            "history": obs.history,
+            "done": obs.done,
+            "observation_text": obs.observation_text
+        },
+        "reward": reward.value,
+        "done": done,
+        "info": info
+    }
+
+
+@app.get("/openenv/validate")
+def openenv_validate():
+    return {"status": "ok"}
+
+
+# =========================
+# RESET - WITH DYNAMIC STATE
 # =========================
 
 @app.post("/reset")
@@ -372,6 +547,9 @@ def reset(req: ResetRequest):
     
     config = REWARD_CONFIG[task_id]
     max_score = config["max_score"]
+    
+    random_order_id = str(random.randint(10000, 99999))
+    user_prompt = random.choice(AMBIGUOUS_QUERIES) if task_id == "ambiguous_request" else None
     
     sessions[session_id] = {
         "env": env,
@@ -385,7 +563,15 @@ def reset(req: ResetRequest):
         "perfect_completion": False,
         "total_reward": 0.0,
         "history": [],
-        "start_time": datetime.now().isoformat()
+        "start_time": datetime.now().isoformat(),
+        "order_id": random_order_id,
+        "order_checked": False,
+        "address_collected": False,
+        "address_confirmed": False,
+        "policy_explained": False,
+        "resolved": False,
+        "user_prompt": user_prompt,
+        "last_action_type": None
     }
     
     return {
@@ -396,13 +582,50 @@ def reset(req: ResetRequest):
         "done": False,
         "score": 0.0,
         "max_score": max_score,
-        "score_display": f"0.00 / {max_score}"
+        "score_display": f"0.00 / {max_score}",
+        "order_id": random_order_id,
+        "user_prompt": user_prompt,
+        "state": {
+            "order_checked": False,
+            "address_collected": False,
+            "address_confirmed": False,
+            "policy_explained": False,
+            "resolved": False,
+            "steps": 0
+        }
     }
 
 @app.get("/reset/{task_id}")
 def reset_get(task_id: str):
     req = ResetRequest(task_id=task_id)
     return reset(req)
+
+# =========================
+# STATE ENDPOINT
+# =========================
+
+@app.get("/state/{session_id}")
+def get_state(session_id: str):
+    if session_id not in sessions:
+        raise HTTPException(404, "Session not found")
+    
+    session = sessions[session_id]
+    
+    return {
+        "session_id": session_id,
+        "task_id": session["task_id"],
+        "state": {
+            "steps": session["steps"],
+            "order_checked": session.get("order_checked", False),
+            "address_collected": session.get("address_collected", False),
+            "address_confirmed": session.get("address_confirmed", False),
+            "policy_explained": session.get("policy_explained", False),
+            "resolved": session.get("resolved", False),
+            "expert_used_count": session.get("expert_used_count", 0),
+            "total_reward": session.get("total_reward", 0.0),
+            "done": session.get("done", False)
+        }
+    }
 
 # =========================
 # STEP AI
@@ -416,80 +639,158 @@ def step_ai(req: StepRequest):
     session = sessions[req.session_id]
     config = REWARD_CONFIG[session["task_id"]]
     max_score = config["max_score"]
+    max_steps_limit = MAX_STEPS[session["task_id"]]
 
     if session["done"]:
-        if session["perfect_completion"]:
-            return {
-                "message": "✅ Task already completed perfectly! Great job!",
-                "done": True,
-                "perfect": True,
-                "score": session["total_reward"],
-                "max_score": max_score,
-                "score_display": f"{session['total_reward']:.2f} / {max_score}",
-                "step": session["steps"]
+        return {
+            "message": "Task already completed. Please reset.",
+            "done": True,
+            "score": min(session["total_reward"], max_score),
+            "max_score": max_score,
+            "score_display": f"{min(session['total_reward'], max_score):.2f} / {max_score}",
+            "step": session["steps"],
+            "state": {
+                "order_checked": session.get("order_checked", False),
+                "address_collected": session.get("address_collected", False),
+                "address_confirmed": session.get("address_confirmed", False),
+                "steps": session["steps"],
+                "done": True
             }
-        else:
-            return {
-                "message": f"⚠️ Task already completed (score: {session['total_reward']:.2f}/{max_score})",
-                "done": True,
-                "perfect": False,
-                "score": session["total_reward"],
-                "max_score": max_score,
-                "score_display": f"{session['total_reward']:.2f} / {max_score}",
-                "step": session["steps"]
-            }
+        }
 
     env = session["env"]
-    step_num = session["steps"] + 1
     used_expert = req.use_expert
     
-    # Call AI model
-    ai_action = call_ai_model(session["task_id"], step_num, session["history"], used_expert)
+    ai_action = call_ai_model(session["task_id"], session, used_expert)
     
     try:
         action = Action(**ai_action)
+        parse_success = True
     except Exception:
-        ai_action = get_step_default_action(session["task_id"], step_num)
+        ai_action = {"action_type": "send_reply", "message": "I'm not sure how to help. Could you clarify?"}
         action = Action(**ai_action)
+        parse_success = False
     
-    # Validate AI's action
-    is_valid, reward_value, explanation, expected, step_is_perfect = validate_action(
-        session["task_id"], step_num, ai_action, used_expert
+    is_valid, reward_value, explanation, is_perfect = validate_and_update_state(
+        session["task_id"], ai_action, session, used_expert
     )
     
-    # Take step in environment
+    if not parse_success:
+        reward_value = -0.5
+        explanation = "❌ Invalid JSON format from model"
+    
     obs, env_reward, done, info = env.step(action)
     
-    # Update session
+    env_r = env_reward.value if hasattr(env_reward, "value") else float(env_reward)
+    reward_value = 0.7 * reward_value + 0.3 * env_r
+    
+    reward_value -= 0.05
+    
+    if len(session["actions_taken"]) >= 2:
+        last_two_same = (
+            session["actions_taken"][-1].get("action_type") == 
+            session["actions_taken"][-2].get("action_type") == 
+            ai_action.get("action_type")
+        )
+        if last_two_same:
+            reward_value -= 0.25
+    
+    elapsed_seconds = 0
+    try:
+        start_time = datetime.fromisoformat(session["start_time"])
+        elapsed_seconds = (datetime.now() - start_time).seconds
+        if elapsed_seconds > 30:
+            reward_value -= 0.05
+    except:
+        pass
+    
+    reward_value = max(reward_value, -0.8)
+    
     session["steps"] += 1
     session["rewards"].append(reward_value)
     session["explanations"].append(explanation)
     session["actions_taken"].append(ai_action)
     session["total_reward"] += reward_value
+    session["total_reward"] = min(session["total_reward"], max_score)
+    session["total_reward"] = max(session["total_reward"], 0.0)
     session["history"].append(ai_action)
     
     if used_expert:
         session["expert_used_count"] += 1
     
-    # Determine if task is complete
-    all_steps_complete = False
-    if session["task_id"] in ["address_change_hard", "ambiguous_request"]:
-        all_steps_complete = session["steps"] >= 3
-    else:
-        all_steps_complete = session["steps"] >= 1
-    
-    if all_steps_complete:
+    if session["steps"] >= max_steps_limit:
         session["done"] = True
-        # Perfect completion: no expert used AND total reward >= max_score
-        perfect_completion = (session["expert_used_count"] == 0 and session["total_reward"] >= max_score - 0.01)
+        session["total_reward"] = max(0, session["total_reward"] - 0.3)
+        return {
+            "step": session["steps"],
+            "action": ai_action,
+            "reward": round(reward_value, 2),
+            "reward_explanation": explanation,
+            "done": True,
+            "perfect_completion": False,
+            "score": session["total_reward"],
+            "max_score": max_score,
+            "score_display": f"{session['total_reward']:.2f} / {max_score}",
+            "total_reward": session["total_reward"],
+            "is_valid": is_valid,
+            "used_expert": used_expert,
+            "expert_penalty": -0.2 if used_expert else 0,
+            "expert_used_count": session["expert_used_count"],
+            "completion_message": "❌ Max steps reached",
+            "state": {
+                "order_checked": session.get("order_checked", False),
+                "address_collected": session.get("address_collected", False),
+                "address_confirmed": session.get("address_confirmed", False),
+                "steps": session["steps"],
+                "done": True
+            }
+        }
+    
+    all_steps_complete = False
+    
+    if session["task_id"] == "order_status_easy":
+        all_steps_complete = session.get("order_checked", False)
+    elif session["task_id"] == "refund_policy_medium":
+        all_steps_complete = session.get("policy_explained", False)
+    elif session["task_id"] == "address_change_hard":
+        all_steps_complete = (
+            session.get("order_checked", False) and
+            session.get("address_collected", False) and
+            session.get("address_confirmed", False)
+        )
+    elif session["task_id"] == "ambiguous_request":
+        all_steps_complete = (
+            session.get("order_checked", False) and
+            session.get("address_collected", False) and
+            session.get("resolved", False)
+        )
+    
+    if all_steps_complete and not session["done"]:
+        session["done"] = True
+        perfect_completion = (
+            session["expert_used_count"] == 0 and
+            session["steps"] <= max_steps_limit - 2 and
+            session["total_reward"] >= max_score * 0.8
+        )
         session["perfect_completion"] = perfect_completion
     
-    score_value = min(max(session["total_reward"], 0.0), max_score)
+    score_value = min(session["total_reward"], max_score)
+    
+    completion_message = None
+    if session["done"]:
+        if session.get("perfect_completion"):
+            completion_message = "🎉 Perfect completion!"
+        elif session["expert_used_count"] > 0:
+            completion_message = f"⚠️ Completed with expert assistance ({session['expert_used_count']} time(s))"
+        elif session["total_reward"] < max_score * 0.6:
+            completion_message = "❌ Poor completion"
+        else:
+            completion_message = "✅ Completed successfully"
     
     return {
         "step": session["steps"],
         "action": ai_action,
-        "reward": reward_value,
+        "reward": round(reward_value, 2),
         "reward_explanation": explanation,
         "done": session["done"],
         "perfect_completion": session.get("perfect_completion", False),
@@ -501,8 +802,14 @@ def step_ai(req: StepRequest):
         "used_expert": used_expert,
         "expert_penalty": -0.2 if used_expert else 0,
         "expert_used_count": session["expert_used_count"],
-        "expected_action": expected if not is_valid else None,
-        "completion_message": "🎉 Task completed!" if session["done"] else None
+        "completion_message": completion_message,
+        "state": {
+            "order_checked": session.get("order_checked", False),
+            "address_collected": session.get("address_collected", False),
+            "address_confirmed": session.get("address_confirmed", False),
+            "steps": session["steps"],
+            "done": session["done"]
+        }
     }
 
 
@@ -514,7 +821,7 @@ def get_session(session_id: str):
     session = sessions[session_id]
     config = REWARD_CONFIG[session["task_id"]]
     max_score = config["max_score"]
-    score_value = min(max(session["total_reward"], 0.0), max_score)
+    score_value = min(session["total_reward"], max_score)
     
     return {
         "session_id": session_id,
@@ -529,7 +836,12 @@ def get_session(session_id: str):
         "max_score": max_score,
         "score_display": f"{score_value:.2f} / {max_score}",
         "done": session["done"],
-        "perfect_completion": session.get("perfect_completion", False)
+        "perfect_completion": session.get("perfect_completion", False),
+        "session_state": {
+            "order_checked": session.get("order_checked", False),
+            "address_collected": session.get("address_collected", False),
+            "address_confirmed": session.get("address_confirmed", False)
+        }
     }
 
 
@@ -537,10 +849,10 @@ def get_session(session_id: str):
 def tasks():
     return {
         "tasks": [
-            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Look up order status using lookup_order", "difficulty": "easy", "max_steps": 3, "max_score": 1.0},
-            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Explain refund policy in a reply", "difficulty": "medium", "max_steps": 3, "max_score": 1.0},
-            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Handle address change in 3 steps", "difficulty": "hard", "max_steps": 5, "max_score": 1.0},
-            {"task_id": "ambiguous_request", "name": "Ambiguous Customer Intent", "description": "Customer has both order issue and address change - requires handling both", "difficulty": "hard+", "max_steps": 5, "max_score": 1.0}
+            {"task_id": "order_status_easy", "name": "Order Status Query", "description": "Customer wants to check their order status", "difficulty": "easy", "max_steps": 5, "max_score": 1.0},
+            {"task_id": "refund_policy_medium", "name": "Refund Policy Explanation", "description": "Customer wants to know the refund policy", "difficulty": "medium", "max_steps": 5, "max_score": 1.0},
+            {"task_id": "address_change_hard", "name": "Address Change Request", "description": "Customer wants to change their shipping address", "difficulty": "hard", "max_steps": 8, "max_score": 1.0},
+            {"task_id": "ambiguous_request", "name": "Moved & Missing Package", "description": "Customer issue with moved address and missing package", "difficulty": "hard+", "max_steps": 10, "max_score": 1.0}
         ]
     }
 
@@ -550,371 +862,835 @@ def health():
     return {"status": "healthy", "active_sessions": len(sessions), "ai_model": MODEL_NAME if client else "fallback"}
 
 
+# =========================
+# REACT-STYLE PREMIUM UI WITH COMPLETION MESSAGE & TASK SWITCH RESET
+# =========================
+
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return """
-<!DOCTYPE html>
-<html>
+    return """<!DOCTYPE html>
+<html lang="en">
 <head>
-    <title>Customer Support Environment | RL Agent Training</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customer Support RL | AI Agent Training Platform</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: radial-gradient(circle at 20% 30%, #0a0a1a, #050510);
             min-height: 100vh;
-            padding: 20px;
+            color: #e2e8f0;
+            overflow-x: hidden;
         }
-        .container { max-width: 1400px; margin: 0 auto; }
         
-        .header { text-align: center; color: white; margin-bottom: 30px; }
-        .header h1 { font-size: 2.5em; margin-bottom: 10px; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .header p { opacity: 0.8; }
+        #particle-canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+            opacity: 0.5;
+        }
         
-        .tasks-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(450px, 1fr)); gap: 20px; }
+        .glass-header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(12px);
+            background: rgba(10, 10, 30, 0.7);
+            border-bottom: 1px solid rgba(139, 92, 246, 0.2);
+        }
         
-        .task-card {
-            background: rgba(255,255,255,0.1);
+        .header-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0.75rem 1.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .logo-area {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .logo-icon {
+            width: 2rem;
+            height: 2rem;
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
+            border-radius: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+        }
+        
+        .logo-icon svg { width: 1rem; height: 1rem; color: white; }
+        .logo-text h1 { font-size: 0.875rem; font-weight: 600; }
+        .logo-text p { font-size: 0.625rem; color: #94a3b8; }
+        
+        .status-area {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .model-badge {
+            background: rgba(139, 92, 246, 0.15);
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.375rem;
+            font-family: monospace;
+            font-size: 0.625rem;
+            border: 1px solid rgba(139, 92, 246, 0.3);
+        }
+        
+        .status-dot {
+            width: 0.5rem;
+            height: 0.5rem;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .status-online { background: #10b981; box-shadow: 0 0 8px #10b981; animation: pulse 2s infinite; }
+        .status-offline { background: #ef4444; }
+        .status-checking { background: #f59e0b; animation: pulse 1s infinite; }
+        
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        
+        .main-layout {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1.5rem;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .two-columns {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 1.5rem;
+        }
+        
+        @media (max-width: 768px) { .two-columns { grid-template-columns: 1fr; } }
+        
+        .task-item {
+            background: rgba(255, 255, 255, 0.03);
             backdrop-filter: blur(10px);
-            border-radius: 16px;
-            padding: 20px;
-            border: 1px solid rgba(255,255,255,0.2);
-        }
-        .task-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-        .task-header h3 { color: white; font-size: 1.3em; }
-        .difficulty { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: bold; }
-        .easy { background: #10b981; }
-        .medium { background: #f59e0b; }
-        .hard { background: #ef4444; }
-        .hard-plus { background: #8b5cf6; }
-        .task-desc { color: rgba(255,255,255,0.7); font-size: 13px; margin-bottom: 15px; }
-        
-        .progress-section { margin: 15px 0; }
-        .progress-label { display: flex; justify-content: space-between; color: rgba(255,255,255,0.7); font-size: 12px; margin-bottom: 5px; }
-        .progress-bar-container { background: rgba(255,255,255,0.2); border-radius: 10px; height: 8px; overflow: hidden; }
-        .progress-fill { background: linear-gradient(90deg, #10b981, #667eea); height: 100%; border-radius: 10px; transition: width 0.3s ease; width: 0%; }
-        
-        .expert-badge { background: rgba(245, 158, 11, 0.2); border: 1px solid #f59e0b; border-radius: 8px; padding: 8px; margin: 10px 0; text-align: center; }
-        .expert-badge span { color: #f59e0b; font-size: 12px; }
-        
-        .button-group { display: flex; gap: 10px; margin: 15px 0; flex-wrap: wrap; }
-        button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 1rem;
+            padding: 1rem;
             cursor: pointer;
-            font-size: 13px;
-            transition: all 0.2s;
+            transition: all 0.2s ease;
+            margin-bottom: 0.75rem;
         }
-        button:hover { opacity: 0.9; transform: scale(1.02); }
-        button:disabled { opacity: 0.4; cursor: not-allowed; }
-        .reset-btn { background: linear-gradient(135deg, #f59e0b, #d97706); }
-        .expert-btn { background: linear-gradient(135deg, #f59e0b, #d97706); border: 1px solid #f59e0b; }
-        .auto-btn { background: linear-gradient(135deg, #10b981, #059669); }
         
-        .response-area {
-            background: rgba(0,0,0,0.3);
-            border-radius: 12px;
-            padding: 12px;
-            margin-top: 15px;
+        .task-item:hover {
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(139, 92, 246, 0.3);
+            transform: translateY(-2px);
+        }
+        
+        .task-item.selected {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(99, 102, 241, 0.1));
+            border-color: #8b5cf6;
+        }
+        
+        .task-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        
+        .task-name { font-weight: 600; font-size: 0.9rem; }
+        .difficulty-tag {
+            font-size: 0.625rem;
+            padding: 0.125rem 0.5rem;
+            border-radius: 1rem;
+            font-weight: 500;
+        }
+        .diff-easy { background: #10b981; color: white; }
+        .diff-medium { background: #f59e0b; color: white; }
+        .diff-hard { background: #ef4444; color: white; }
+        .diff-hardplus { background: #8b5cf6; color: white; }
+        
+        .task-desc { font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.5rem; }
+        .task-meta { display: flex; gap: 0.75rem; font-size: 0.625rem; color: #64748b; }
+        
+        .control-panel {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 1rem;
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .btn-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 0;
+        }
+        
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.375rem;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
+            color: white;
+        }
+        .btn-primary:hover:not(:disabled) { opacity: 0.9; transform: scale(1.02); }
+        
+        .btn-outline {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #e2e8f0;
+        }
+        .btn-outline:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
+        
+        .btn-expert {
+            border-color: #f59e0b;
+            color: #f59e0b;
+        }
+        .btn-expert:hover:not(:disabled) { background: rgba(245, 158, 11, 0.1); }
+        
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        /* FIXED SCORE RING - COMPLETE CIRCLE */
+        .score-ring-container {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 1rem;
+        }
+        
+        .score-ring {
+            position: relative;
+            width: 140px;
+            height: 140px;
+        }
+        
+        .score-ring svg {
+            width: 100%;
+            height: 100%;
+            transform: rotate(-90deg);
+        }
+        
+        .score-ring-bg {
+            stroke: rgba(255, 255, 255, 0.08);
+            fill: none;
+            stroke-width: 10;
+        }
+        
+        .score-ring-fill {
+            stroke: #8b5cf6;
+            fill: none;
+            stroke-width: 10;
+            stroke-linecap: round;
+            transition: stroke-dashoffset 0.6s ease;
+            filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.5));
+        }
+        
+        .score-ring-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+        
+        .score-number {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #8b5cf6;
+        }
+        
+        .score-max-text {
+            font-size: 0.7rem;
+            color: #64748b;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.75rem;
+            margin: 0;
+        }
+        
+        .stat-card {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 0.75rem;
+            padding: 0.75rem;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .stat-value { font-size: 1.25rem; font-weight: 700; }
+        .stat-label { font-size: 0.6rem; text-transform: uppercase; color: #64748b; margin-top: 0.25rem; }
+        
+        .reward-chart {
+            display: flex;
+            align-items: flex-end;
+            gap: 0.25rem;
+            height: 50px;
+            margin: 0.5rem 0;
+        }
+        
+        .chart-bar {
+            flex: 1;
+            background: linear-gradient(180deg, #10b981, #059669);
+            border-radius: 2px 2px 0 0;
+            transition: height 0.3s ease;
+        }
+        
+        .chart-bar.negative { background: linear-gradient(180deg, #ef4444, #dc2626); }
+        
+        .timeline {
             max-height: 400px;
             overflow-y: auto;
+            margin-top: 0;
         }
         
-        .step-entry {
-            background: rgba(255,255,255,0.08);
-            border-radius: 10px;
-            padding: 12px;
-            margin-bottom: 10px;
-            border-left: 3px solid #667eea;
+        .timeline-item {
+            padding: 0.75rem;
+            border-left: 2px solid #8b5cf6;
+            margin-bottom: 0.75rem;
+            background: rgba(255, 255, 255, 0.02);
+            border-radius: 0.5rem;
         }
-        .step-entry.expert-used { border-left-color: #f59e0b; background: rgba(245, 158, 11, 0.1); }
-        .step-header { display: flex; justify-content: space-between; margin-bottom: 8px; }
-        .step-number { font-weight: bold; color: #667eea; }
-        .step-reward { font-weight: bold; }
+        
+        .timeline-item.expert { border-left-color: #f59e0b; background: rgba(245, 158, 11, 0.05); }
+        
+        .timeline-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+            font-size: 0.7rem;
+        }
+        
         .reward-positive { color: #10b981; }
         .reward-negative { color: #ef4444; }
-        .step-action { font-family: monospace; font-size: 11px; color: rgba(255,255,255,0.7); margin: 5px 0; word-break: break-all; }
-        .step-explanation { font-size: 11px; color: #aaa; margin-top: 5px; }
-        .expert-warning { color: #f59e0b; font-size: 11px; margin-top: 5px; }
         
-        .score-display { font-size: 20px; font-weight: bold; text-align: center; padding: 10px; border-radius: 10px; margin: 10px 0; }
-        .score-perfect { background: rgba(16, 185, 129, 0.2); color: #10b981; }
-        .score-penalty { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
-        .score-normal { background: rgba(102, 126, 234, 0.2); color: #667eea; }
+        .timeline-action {
+            font-family: monospace;
+            font-size: 0.65rem;
+            color: #94a3b8;
+            word-break: break-all;
+        }
         
-        .completion-message { padding: 10px; border-radius: 8px; margin-top: 10px; font-size: 13px; font-weight: bold; text-align: center; }
-        .completion-perfect { background: rgba(16, 185, 129, 0.2); color: #10b981; border: 1px solid #10b981; }
-        .completion-penalty { background: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid #f59e0b; }
+        .timeline-explanation { font-size: 0.65rem; color: #64748b; margin-top: 0.25rem; }
+        .timeline-state { font-size: 0.6rem; color: #475569; margin-top: 0.25rem; }
         
-        .status { position: fixed; bottom: 15px; right: 15px; background: rgba(0,0,0,0.7); padding: 6px 12px; border-radius: 20px; font-size: 11px; color: #10b981; }
-        .empty-state { text-align: center; color: rgba(255,255,255,0.4); padding: 20px; }
+        .section-title {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #64748b;
+            margin-bottom: 0.75rem;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #64748b;
+        }
+        
+        .spinner {
+            width: 1rem;
+            height: 1rem;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        .task-header-card {
+            padding: 1rem;
+            border-radius: 1rem;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        
+        .progress-bar-container {
+            height: 8px;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.1);
+            margin-top: 0.75rem;
+            overflow: hidden;
+        }
+        
+        .progress-bar-fill {
+            height: 100%;
+            border-radius: 6px;
+            background: linear-gradient(90deg, #10b981, #22c55e);
+            transition: width 0.3s ease;
+        }
+        
+        .completion-message {
+            margin-bottom: 0.75rem;
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            font-size: 0.75rem;
+            text-align: center;
+            background: rgba(139, 92, 246, 0.1);
+            border: 1px solid rgba(139, 92, 246, 0.3);
+            color: #e2e8f0;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>🎯 Customer Support Environment</h1>
-            <p>RL Agent Training | Explainable Rewards | Ask Expert Feature</p>
+    <canvas id="particle-canvas"></canvas>
+    
+    <header class="glass-header">
+        <div class="header-container">
+            <div class="logo-area">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <h1>Customer Support RL</h1>
+                    <p>Reinforcement Learning Simulator</p>
+                </div>
+            </div>
+            <div class="status-area" id="status-area"></div>
         </div>
-        <div class="tasks-grid" id="tasks"></div>
-        <div class="status" id="status">🟢 System Online</div>
-    </div>
-
+    </header>
+    
+    <main class="main-layout">
+        <div class="two-columns">
+            <div>
+                <div class="section-title">TRAINING TASKS</div>
+                <div id="tasks-container"></div>
+            </div>
+            
+            <div>
+                <div class="control-panel">
+                    <div id="task-header-card"></div>
+                    <div id="stats-container"></div>
+                    <div id="controls-container"></div>
+                    <div id="performance-container"></div>
+                    <div class="section-title">STEP TIMELINE</div>
+                    <div id="timeline-container" class="timeline"></div>
+                </div>
+            </div>
+        </div>
+    </main>
+    
     <script>
         const API_BASE = window.location.origin;
-        let currentSessions = {};
-
-        async function checkHealth() {
-            try {
-                const res = await fetch(`${API_BASE}/health`);
-                const data = await res.json();
-                document.getElementById('status').innerHTML = `🟢 Online | ${data.active_sessions} sessions | 🤖 ${data.ai_model || 'LLaMA'}`;
-            } catch(e) { document.getElementById('status').innerHTML = '🔴 Offline'; }
-        }
-
-        async function resetTask(taskId, maxScore) {
-            try {
-                const res = await fetch(`${API_BASE}/reset/${taskId}`);
-                const data = await res.json();
-                currentSessions[taskId] = data.session_id;
-                
-                const responseDiv = document.getElementById(`response-${taskId}`);
-                responseDiv.innerHTML = `<div class="empty-state">✅ Environment reset. Ready for training.</div>`;
-                
-                const progressFill = document.getElementById(`progress-${taskId}`);
-                if (progressFill) progressFill.style.width = '0%';
-                
-                const scoreDiv = document.getElementById(`score-display-${taskId}`);
-                if (scoreDiv) {
-                    scoreDiv.innerHTML = `Score: 0.00 / ${maxScore}`;
-                    scoreDiv.className = 'score-display score-normal';
-                }
-                
-                const stepBtn = document.getElementById(`step-${taskId}`);
-                stepBtn.disabled = false;
-                stepBtn.textContent = '🤖 Take Step';
-                
-                const expertBtn = document.getElementById(`expert-${taskId}`);
-                if (expertBtn) expertBtn.disabled = false;
-                
-                const autoBtn = document.getElementById(`auto-${taskId}`);
-                if (autoBtn) autoBtn.disabled = false;
-                
-                const completionDiv = document.getElementById(`completion-${taskId}`);
-                if (completionDiv) completionDiv.innerHTML = '';
-                
-                const progressLabel = document.getElementById(`progress-label-${taskId}`);
-                if (progressLabel) progressLabel.textContent = '0%';
-                
-            } catch(e) { alert('Reset error: ' + e.message); }
-        }
         
-        function updateProgress(taskId, scoreValue, maxScore) {
-            const progressFill = document.getElementById(`progress-${taskId}`);
-            const progressLabel = document.getElementById(`progress-label-${taskId}`);
-            if (progressFill && progressLabel) {
-                let percent = 0;
-                if (maxScore > 0 && scoreValue !== undefined && scoreValue !== null) {
-                    percent = (scoreValue / maxScore) * 100;
-                    percent = Math.min(100, Math.max(0, percent));
-                }
-                progressFill.style.width = `${percent}%`;
-                progressLabel.textContent = `${Math.round(percent)}%`;
+        let tasks = [];
+        let selectedTask = null;
+        let sessionId = null;
+        let steps = [];
+        let score = 0;
+        let maxScore = 1;
+        let done = false;
+        let perfect = false;
+        let completionMsg = null;
+        let loading = false;
+        let online = null;
+        let aiModel = "";
+        
+        // Particle animation
+        (function initParticles() {
+            const canvas = document.getElementById('particle-canvas');
+            const ctx = canvas.getContext('2d');
+            let particles = [];
+            
+            function resize() {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
             }
-        }
-
-        async function takeStep(taskId, useExpert = false, maxScore) {
-            if (!currentSessions[taskId]) { alert('Please reset first!'); return; }
             
-            const stepBtn = document.getElementById(`step-${taskId}`);
-            const expertBtn = document.getElementById(`expert-${taskId}`);
-            stepBtn.disabled = true;
-            if (expertBtn) expertBtn.disabled = true;
-            stepBtn.textContent = useExpert ? '⏳ Asking Expert...' : '⏳ AI Thinking...';
+            function createParticles() {
+                particles = [];
+                for (let i = 0; i < 80; i++) {
+                    particles.push({
+                        x: Math.random() * canvas.width,
+                        y: Math.random() * canvas.height,
+                        vx: (Math.random() - 0.5) * 0.3,
+                        vy: (Math.random() - 0.5) * 0.3,
+                        size: Math.random() * 2 + 0.5,
+                        alpha: Math.random() * 0.3 + 0.1
+                    });
+                }
+            }
             
-            try {
-                const res = await fetch(`${API_BASE}/step_ai`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: currentSessions[taskId], use_expert: useExpert })
+            function draw() {
+                if (!ctx) return;
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                particles.forEach(p => {
+                    p.x += p.vx;
+                    p.y += p.vy;
+                    if (p.x < 0 || p.x > canvas.width) p.vx *= -1;
+                    if (p.y < 0 || p.y > canvas.height) p.vy *= -1;
+                    
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(139, 92, 246, ${p.alpha})`;
+                    ctx.fill();
                 });
-                const data = await res.json();
                 
-                const responseDiv = document.getElementById(`response-${taskId}`);
-                const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
-                const expertClass = data.used_expert ? 'expert-used' : '';
-                const expertWarning = data.used_expert ? `<div class="expert-warning">🎓 Expert Used! Penalty: -0.2 (Total: ${data.expert_used_count})</div>` : '';
-                
-                const stepHtml = `
-                    <div class="step-entry ${expertClass}">
-                        <div class="step-header">
-                            <span class="step-number">Step ${data.step}</span>
-                            <span class="step-reward ${rewardClass}">${data.reward >= 0 ? '+' : ''}${data.reward}</span>
-                        </div>
-                        <div class="step-action">Action: ${JSON.stringify(data.action)}</div>
-                        <div class="step-explanation">📖 ${data.reward_explanation}</div>
-                        ${expertWarning}
-                    </div>
-                `;
-                
-                responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
-                
-                const scoreDiv = document.getElementById(`score-display-${taskId}`);
-                if (scoreDiv) {
-                    scoreDiv.innerHTML = `Score: ${data.score_display}`;
-                    if (data.perfect_completion) {
-                        scoreDiv.className = 'score-display score-perfect';
-                    } else if (data.expert_used_count > 0 && data.done) {
-                        scoreDiv.className = 'score-display score-penalty';
-                    } else {
-                        scoreDiv.className = 'score-display score-normal';
+                for (let i = 0; i < particles.length; i++) {
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const dx = particles[i].x - particles[j].x;
+                        const dy = particles[i].y - particles[j].y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist < 100) {
+                            ctx.beginPath();
+                            ctx.moveTo(particles[i].x, particles[i].y);
+                            ctx.lineTo(particles[j].x, particles[j].y);
+                            ctx.strokeStyle = `rgba(139, 92, 246, ${0.05 * (1 - dist / 100)})`;
+                            ctx.lineWidth = 0.5;
+                            ctx.stroke();
+                        }
                     }
                 }
                 
-                updateProgress(taskId, data.score, maxScore);
-                
-                const completionDiv = document.getElementById(`completion-${taskId}`);
-                if (completionDiv && data.done) {
-                    if (data.perfect_completion) {
-                        completionDiv.innerHTML = `<div class="completion-message completion-perfect">🎉 PERFECT COMPLETION! No expert used, optimal score!</div>`;
-                    } else if (data.expert_used_count > 0) {
-                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with penalties (expert used: ${data.expert_used_count} time(s))</div>`;
-                    } else if (data.score < maxScore) {
-                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with score: ${data.score_display}</div>`;
-                    }
-                }
-                
-                if (data.done) {
-                    stepBtn.disabled = true;
-                    stepBtn.textContent = '✅ Completed';
-                    if (expertBtn) expertBtn.disabled = true;
-                    const autoBtn = document.getElementById(`auto-${taskId}`);
-                    if (autoBtn) autoBtn.disabled = true;
-                } else {
-                    stepBtn.disabled = false;
-                    stepBtn.textContent = '🤖 Take Next Step';
-                    if (expertBtn) expertBtn.disabled = false;
-                }
-            } catch(e) {
-                alert('Step error: ' + e.message);
-                stepBtn.disabled = false;
-                stepBtn.textContent = '🤖 Retry';
-                if (expertBtn) expertBtn.disabled = false;
-            }
-        }
-
-        async function runFullTask(taskId, maxScore) {
-            if (!currentSessions[taskId]) { await resetTask(taskId, maxScore); await new Promise(r => setTimeout(r, 500)); }
-            
-            const stepBtn = document.getElementById(`step-${taskId}`);
-            const expertBtn = document.getElementById(`expert-${taskId}`);
-            const autoBtn = document.getElementById(`auto-${taskId}`);
-            autoBtn.disabled = true;
-            autoBtn.textContent = '🏃 Running...';
-            stepBtn.disabled = true;
-            if (expertBtn) expertBtn.disabled = true;
-            
-            let done = false;
-            let maxAttempts = 10;
-            let attempts = 0;
-            
-            while (!done && attempts < maxAttempts) {
-                await new Promise(r => setTimeout(r, 600));
-                
-                const res = await fetch(`${API_BASE}/step_ai`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: currentSessions[taskId], use_expert: false })
-                });
-                const data = await res.json();
-                done = data.done;
-                attempts++;
-                
-                const responseDiv = document.getElementById(`response-${taskId}`);
-                const rewardClass = data.reward >= 0 ? 'reward-positive' : 'reward-negative';
-                const stepHtml = `
-                    <div class="step-entry">
-                        <div class="step-header">
-                            <span class="step-number">Step ${data.step}</span>
-                            <span class="step-reward ${rewardClass}">${data.reward >= 0 ? '+' : ''}${data.reward}</span>
-                        </div>
-                        <div class="step-action">Action: ${JSON.stringify(data.action)}</div>
-                        <div class="step-explanation">📖 ${data.reward_explanation}</div>
-                    </div>
-                `;
-                responseDiv.innerHTML = stepHtml + responseDiv.innerHTML;
-                
-                const scoreDiv = document.getElementById(`score-display-${taskId}`);
-                if (scoreDiv) scoreDiv.innerHTML = `Score: ${data.score_display}`;
-                updateProgress(taskId, data.score, maxScore);
-                
-                const completionDiv = document.getElementById(`completion-${taskId}`);
-                if (completionDiv && data.done) {
-                    if (data.perfect_completion) {
-                        completionDiv.innerHTML = `<div class="completion-message completion-perfect">🎉 PERFECT COMPLETION! No expert used, optimal score!</div>`;
-                    } else if (data.expert_used_count > 0) {
-                        completionDiv.innerHTML = `<div class="completion-message completion-penalty">⚠️ Completed with penalties (expert used: ${data.expert_used_count} time(s))</div>`;
-                    }
-                }
+                requestAnimationFrame(draw);
             }
             
-            autoBtn.disabled = true;
-            autoBtn.textContent = '✅ Complete';
-            if (!done) stepBtn.disabled = false;
-        }
-
-        async function loadTasks() {
+            window.addEventListener('resize', () => {
+                resize();
+                createParticles();
+            });
+            resize();
+            createParticles();
+            draw();
+        })();
+        
+        async function fetchTasks() {
             try {
                 const res = await fetch(`${API_BASE}/tasks`);
                 const data = await res.json();
-                const grid = document.getElementById('tasks');
-                grid.innerHTML = data.tasks.map(t => {
-                    let difficultyClass = t.difficulty;
-                    if (t.difficulty === 'hard+') difficultyClass = 'hard-plus';
-                    return `
-                    <div class="task-card">
-                        <div class="task-header">
-                            <h3>${t.name}</h3>
-                            <span class="difficulty ${difficultyClass}">${t.difficulty.toUpperCase()}</span>
-                        </div>
-                        <div class="task-desc">${t.description}</div>
-                        
-                        <div class="progress-section">
-                            <div class="progress-label"><span>Progress</span><span id="progress-label-${t.task_id}">0%</span></div>
-                            <div class="progress-bar-container"><div id="progress-${t.task_id}" class="progress-fill" style="width: 0%"></div></div>
-                        </div>
-                        
-                        <div id="score-display-${t.task_id}" class="score-display score-normal">Score: 0.00 / ${t.max_score}</div>
-                        
-                        <div class="button-group">
-                            <button class="reset-btn" onclick="resetTask('${t.task_id}', ${t.max_score})">🔄 Reset</button>
-                            <button id="step-${t.task_id}" onclick="takeStep('${t.task_id}', false, ${t.max_score})" disabled>🤖 Take Step</button>
-                            <button id="expert-${t.task_id}" class="expert-btn" onclick="takeStep('${t.task_id}', true, ${t.max_score})" disabled>🎓 Ask Expert (-0.2)</button>
-                            <button id="auto-${t.task_id}" class="auto-btn" onclick="runFullTask('${t.task_id}', ${t.max_score})" disabled>⚡ Run Full Episode</button>
-                        </div>
-                        
-                        <div class="expert-badge"><span>🎓 Ask Expert: Get guidance (-0.2 penalty per use)</span></div>
-                        
-                        <div id="completion-${t.task_id}"></div>
-                        <div id="response-${t.task_id}" class="response-area">
-                            <div class="empty-state">🔄 Click "Reset" to start training</div>
-                        </div>
-                    </div>
-                `}).join('');
+                tasks = data.tasks || [];
+                renderTasks();
             } catch(e) { console.error(e); }
         }
-
-        checkHealth();
-        loadTasks();
-        setInterval(checkHealth, 30000);
+        
+        async function fetchHealth() {
+            try {
+                const res = await fetch(`${API_BASE}/health`);
+                const data = await res.json();
+                online = true;
+                aiModel = data.ai_model || "";
+                renderStatus();
+            } catch(e) {
+                online = false;
+                renderStatus();
+            }
+        }
+        
+        async function resetTask(taskId, taskMaxScore) {
+            if (loading) return;
+            loading = true;
+            renderControls();
+            try {
+                const res = await fetch(`${API_BASE}/reset/${taskId}`);
+                const data = await res.json();
+                sessionId = data.session_id;
+                steps = [];
+                score = 0;
+                maxScore = data.max_score || taskMaxScore;
+                done = false;
+                perfect = false;
+                completionMsg = null;
+                renderHeaderCard();
+                renderStats();
+                renderPerformance();
+                renderTimeline();
+                renderControls();
+            } catch(e) { alert("Reset error: " + e.message); }
+            finally { loading = false; renderControls(); }
+        }
+        
+        async function takeStep(useExpert = false) {
+            if (!sessionId || done || loading) return;
+            loading = true;
+            renderControls();
+            try {
+                const res = await fetch(`${API_BASE}/step_ai`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId, use_expert: useExpert })
+                });
+                const data = await res.json();
+                steps.unshift(data);
+                score = data.score;
+                maxScore = data.max_score;
+                done = data.done;
+                perfect = data.perfect_completion;
+                completionMsg = data.completion_message;
+                renderStats();
+                renderPerformance();
+                renderTimeline();
+                renderControls();
+            } catch(e) { alert("Step error: " + e.message); }
+            finally { loading = false; renderControls(); }
+        }
+        
+        // FIXED: Force FULL UI reset when switching tasks
+        function selectTask(task) {
+            selectedTask = task;
+            sessionId = null;
+            steps = [];
+            score = 0;
+            maxScore = task.max_score ?? 1;
+            done = false;
+            perfect = false;
+            completionMsg = null;
+            
+            // 🔥 CLEAR UI manually
+            document.getElementById('stats-container').innerHTML = '';
+            document.getElementById('performance-container').innerHTML = '';
+            document.getElementById('timeline-container').innerHTML =
+                '<div class="empty-state">No steps yet. Click "Start Session" then "Step AI" to begin training.</div>';
+            
+            renderTasks();
+            renderHeaderCard();
+            renderControls();
+        }
+        
+        function renderHeaderCard() {
+            const container = document.getElementById('task-header-card');
+            if (!container || !selectedTask) return;
+            
+            let diffClass = '';
+            if (selectedTask.difficulty === 'easy') diffClass = 'diff-easy';
+            else if (selectedTask.difficulty === 'medium') diffClass = 'diff-medium';
+            else if (selectedTask.difficulty === 'hard') diffClass = 'diff-hard';
+            else diffClass = 'diff-hardplus';
+            
+            container.innerHTML = `
+                <div class="task-header-card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <div style="font-weight:600;font-size:1rem;">
+                                ${selectedTask.name}
+                            </div>
+                            <div style="font-size:0.75rem;color:#94a3b8;">
+                                ${selectedTask.description}
+                            </div>
+                        </div>
+                        <span class="difficulty-tag ${diffClass}">
+                            ${selectedTask.difficulty.toUpperCase()}
+                        </span>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function renderStatus() {
+            const container = document.getElementById('status-area');
+            if (!container) return;
+            let html = '';
+            if (aiModel) html += `<span class="model-badge">${aiModel}</span>`;
+            if (online === true) html += `<div><span class="status-dot status-online"></span><span style="margin-left: 0.25rem; font-size: 0.7rem;">Online</span></div>`;
+            else if (online === false) html += `<div><span class="status-dot status-offline"></span><span style="margin-left: 0.25rem; font-size: 0.7rem;">Offline</span></div>`;
+            else html += `<div><span class="status-dot status-checking"></span><span style="margin-left: 0.25rem; font-size: 0.7rem;">Checking...</span></div>`;
+            container.innerHTML = html;
+        }
+        
+        function renderTasks() {
+            const container = document.getElementById('tasks-container');
+            if (!container) return;
+            if (tasks.length === 0) { container.innerHTML = '<div class="empty-state">Loading tasks...</div>'; return; }
+            
+            container.innerHTML = tasks.map(task => {
+                let diffClass = '';
+                if (task.difficulty === 'easy') diffClass = 'diff-easy';
+                else if (task.difficulty === 'medium') diffClass = 'diff-medium';
+                else if (task.difficulty === 'hard') diffClass = 'diff-hard';
+                else diffClass = 'diff-hardplus';
+                
+                return `
+                    <div class="task-item ${selectedTask?.task_id === task.task_id ? 'selected' : ''}" onclick='selectTask(${JSON.stringify(task)})'>
+                        <div class="task-header-row">
+                            <span class="task-name">${task.name}</span>
+                            <span class="difficulty-tag ${diffClass}">${task.difficulty.toUpperCase()}</span>
+                        </div>
+                        <div class="task-desc">${task.description}</div>
+                        <div class="task-meta">
+                            <span>⚡ ${task.max_steps} steps</span>
+                            <span>🎯 ${task.max_score} pts</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        function renderControls() {
+            const container = document.getElementById('controls-container');
+            if (!container || !selectedTask) { if(container) container.innerHTML = ''; return; }
+            
+            container.innerHTML = `
+                <div class="btn-group">
+                    <button class="btn btn-outline" onclick="resetTask('${selectedTask.task_id}', ${selectedTask.max_score})" ${loading ? 'disabled' : ''}>
+                        🔄 ${sessionId ? 'Reset Session' : 'Start Session'}
+                    </button>
+                    ${sessionId && !done ? `
+                        <button class="btn btn-primary" onclick="takeStep(false)" ${loading ? 'disabled' : ''}>
+                            ${loading ? '<div class="spinner"></div>' : '🤖 Step AI'}
+                        </button>
+                        <button class="btn btn-outline btn-expert" onclick="takeStep(true)" ${loading ? 'disabled' : ''}>
+                            🎓 Ask Expert (-0.2)
+                        </button>
+                    ` : ''}
+                </div>
+            `;
+        }
+        
+        // FIXED: Stop rendering stats when no session
+        function renderStats() {
+            const container = document.getElementById('stats-container');
+            if (!container || !sessionId) {
+                if (container) container.innerHTML = '';
+                return;
+            }
+            
+            const expertCount = steps.filter(s => s.used_expert).length;
+            const progressPercent = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+            
+            container.innerHTML = `
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" style="color:#8b5cf6">${score.toFixed(2)}</div>
+                        <div class="stat-label">SCORE</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${steps.length}</div>
+                        <div class="stat-label">STEPS</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${progressPercent}%</div>
+                        <div class="stat-label">PROGRESS</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${expertCount}</div>
+                        <div class="stat-label">EXPERT USES</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // FIXED: Stop rendering performance when no session
+        function renderPerformance() {
+            const container = document.getElementById('performance-container');
+            if (!container || !sessionId) {
+                if (container) container.innerHTML = '';
+                return;
+            }
+            
+            const percent = maxScore > 0 ? Math.min(score / maxScore, 1) : 0;
+            const radius = 60;
+            const circumference = 2 * Math.PI * radius;
+            const dashOffset = circumference * (1 - percent);
+            
+            container.innerHTML = `
+                <div>
+                    <div style="font-size:0.7rem;color:#64748b;margin-bottom:0.5rem;">PERFORMANCE</div>
+                    ${completionMsg ? `
+                        <div class="completion-message">
+                            ${completionMsg}
+                        </div>
+                    ` : ''}
+                    <div class="score-ring-container">
+                        <div class="score-ring">
+                            <svg viewBox="0 0 140 140">
+                                <circle class="score-ring-bg" cx="70" cy="70" r="60"/>
+                                <circle class="score-ring-fill" cx="70" cy="70" r="60"
+                                        stroke-dasharray="${circumference}"
+                                        stroke-dashoffset="${dashOffset}"/>
+                            </svg>
+                            <div class="score-ring-text">
+                                <div class="score-number">${score.toFixed(1)}</div>
+                                <div class="score-max-text">/ ${maxScore.toFixed(1)}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" style="width: ${percent * 100}%"></div>
+                    </div>
+                    <div class="reward-chart" id="reward-chart"></div>
+                </div>
+            `;
+            
+            const chartContainer = document.getElementById('reward-chart');
+            if (chartContainer && steps.length > 0) {
+                const recentSteps = [...steps].slice(0, 12);
+                const maxAbs = Math.max(...recentSteps.map(s => Math.abs(s.reward)), 0.5);
+                chartContainer.innerHTML = recentSteps.map(step => {
+                    const height = (Math.abs(step.reward) / maxAbs) * 40;
+                    return `<div class="chart-bar ${step.reward < 0 ? 'negative' : ''}" style="height: ${Math.max(height, 4)}px;"></div>`;
+                }).join('');
+            }
+        }
+        
+        function renderTimeline() {
+            const container = document.getElementById('timeline-container');
+            if (!container) return;
+            if (!sessionId || steps.length === 0) {
+                container.innerHTML = '<div class="empty-state">No steps yet. Click "Start Session" then "Step AI" to begin training.</div>';
+                return;
+            }
+            
+            container.innerHTML = steps.map(step => {
+                const rewardClass = step.reward >= 0 ? 'reward-positive' : 'reward-negative';
+                const expertClass = step.used_expert ? 'expert' : '';
+                return `
+                    <div class="timeline-item ${expertClass}">
+                        <div class="timeline-header">
+                            <span>Step ${step.step}</span>
+                            <span class="${rewardClass}">${step.reward >= 0 ? '+' : ''}${step.reward}</span>
+                        </div>
+                        <div class="timeline-action">Action: ${JSON.stringify(step.action)}</div>
+                        <div class="timeline-explanation">📖 ${step.reward_explanation}</div>
+                        ${step.state ? `<div class="timeline-state">📊 order_checked=${step.state.order_checked}, address_collected=${step.state.address_collected}, address_confirmed=${step.state.address_confirmed}</div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        async function init() {
+            await fetchHealth();
+            await fetchTasks();
+            renderStatus();
+            setInterval(() => { fetchHealth(); }, 30000);
+        }
+        
+        window.selectTask = selectTask;
+        window.resetTask = resetTask;
+        window.takeStep = takeStep;
+        
+        init();
     </script>
 </body>
 </html>
     """
-
 
 if __name__ == "__main__":
     import uvicorn
