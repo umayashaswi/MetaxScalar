@@ -49,7 +49,13 @@ openenv_history: List = []
 # REQUEST MODELS
 # =========================
 
+# CHANGED: OpenEnv Step Request replaced with StepRequest
 class StepRequest(BaseModel):
+    action_type: str
+    order_id: Optional[str] = None
+    message: Optional[str] = None
+
+class StepAIRequest(BaseModel):
     session_id: str
     use_expert: bool = False
 
@@ -112,74 +118,91 @@ REWARD_CONFIG = {
 }
 
 # =========================
-# OPENENV COMPATIBILITY ENDPOINTS (CRITICAL FIX)
+# OPENENV COMPATIBILITY ENDPOINTS (FIXED)
 # =========================
 
-@app.post("/openenv/reset")
+@app.post("/reset")
 async def openenv_reset():
     """OpenEnv compatible reset endpoint - NO parameters, NO body expected"""
     global openenv_session, openenv_history
     
-    # Create a new environment instance
-    openenv_session = CustomerSupportEnv(task_id="order_status_easy")
+    # Randomly select a task for better testing coverage
+    task_id = random.choice([
+        "order_status_easy",
+        "refund_policy_medium",
+        "address_change_hard",
+        "ambiguous_request"
+    ])
+    
+    # Create a new environment instance with random task
+    openenv_session = CustomerSupportEnv(task_id=task_id)
     obs = openenv_session.reset()
     openenv_history = []
     
-    # Return exactly what OpenEnv expects
+    # CHANGED: Return FLAT response with correct structure
     return {
-        "task_id": obs.task_id,
-        "history": obs.history,
-        "done": obs.done,
-        "observation_text": None
+        "observation": {
+            "task_id": obs.task_id,
+            "history": obs.history,
+            "done": obs.done
+        },
+        "reward": 0.0,
+        "done": False,
+        "info": {}
     }
 
-@app.post("/openenv/step")
-async def openenv_step(action: Action):
-    """OpenEnv compatible step endpoint"""
+@app.post("/step")
+async def openenv_step(req: StepRequest):
+    """OpenEnv compatible step endpoint - CHANGED to use StepRequest"""
     global openenv_session, openenv_history
     
     if openenv_session is None:
-        raise HTTPException(status_code=400, detail="Environment not initialized. Call /openenv/reset first.")
+        raise HTTPException(status_code=400, detail="Call /reset first")
+    
+    # CHANGED: Create action from the StepRequest fields
+    action = Action(**req.dict())
     
     # Take a step in the environment
     obs, reward, done, info = openenv_session.step(action)
     openenv_history.append(action.dict())
     
-    # Return exactly what OpenEnv expects
+    # CHANGED: Return exactly the new format
     return {
-        "observation": {
-            "task_id": obs.task_id,
-            "history": obs.history,
-            "done": obs.done,
-            "observation_text": None
-        },
-        "reward": reward.value,
-        "done": done,
-        "info": info
-    }
+    "observation": {
+        "task_id": obs.task_id,
+        "history": obs.history,
+        "done": obs.done
+    },
+    "reward": reward.value if hasattr(reward, "value") else float(reward),
+    "done": done,
+    "info": info
+}
 
-@app.get("/openenv/validate")
-async def openenv_validate():
-    """OpenEnv validation endpoint"""
-    return {"status": "ok", "ready": True}
-
-@app.get("/openenv/state")
+@app.get("/state")
 async def openenv_state():
     """Get current environment state"""
     global openenv_session
     
     if openenv_session is None:
-        raise HTTPException(status_code=400, detail="Environment not initialized. Call /openenv/reset first.")
+        raise HTTPException(status_code=400, detail="Call /reset first")
     
     return {
-        "task_id": openenv_session.task_id,
-        "step_count": openenv_session.step_count,
-        "total_reward": openenv_session.total_reward,
-        "done": openenv_session.done,
-        "history": openenv_session.history
-    }
+    "observation": {
+        "task_id": obs.task_id,
+        "history": obs.history,
+        "done": obs.done
+    },
+    "reward": reward.value if hasattr(reward, "value") else float(reward),
+    "done": done,
+    "info": info
+}
 
-@app.get("/openenv/tasks")
+@app.get("/validate")
+async def openenv_validate():
+    """OpenEnv validation endpoint"""
+    return {"status": "ok", "ready": True, "openenv_compatible": True}
+
+@app.get("/tasks_list")
 async def openenv_tasks():
     """List available tasks"""
     return {
@@ -216,11 +239,11 @@ async def openenv_tasks():
     }
 
 # =========================
-# LEGACY ENDPOINTS (for backward compatibility)
+# LEGACY ENDPOINTS (for backward compatibility with UI)
 # =========================
 
-@app.post("/reset")
-async def reset(req: ResetRequest):
+@app.post("/reset_with_task")
+async def reset_with_task(req: ResetRequest):
     task_id = req.task_id
     env = CustomerSupportEnv(task_id)
     env.reset()
@@ -279,10 +302,10 @@ async def reset(req: ResetRequest):
 @app.get("/reset/{task_id}")
 async def reset_get(task_id: str):
     req = ResetRequest(task_id=task_id)
-    return await reset(req)
+    return await reset_with_task(req)
 
 @app.post("/step_ai")
-async def step_ai(req: StepRequest):
+async def step_ai(req: StepAIRequest):
     if req.session_id not in sessions:
         raise HTTPException(404, "Invalid session_id. Please reset first.")
 
@@ -652,67 +675,830 @@ async def get_session(session_id: str):
     }
 
 @app.get("/", response_class=HTMLResponse)
-async def home():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Customer Support RL Environment</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; background: #0a0a1a; color: #e2e8f0; }
-            .container { max-width: 800px; margin: 0 auto; }
-            .card { background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; margin: 20px 0; }
-            h1 { color: #8b5cf6; }
-            code { background: #1a1a2a; padding: 2px 5px; border-radius: 3px; }
-            pre { background: #1a1a2a; padding: 10px; border-radius: 5px; overflow-x: auto; }
-            .endpoint { margin: 10px 0; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🤖 Customer Support RL Environment</h1>
-            <div class="card">
-                <h2>OpenEnv Compliant Environment</h2>
-                <p>A realistic customer support simulation for training AI agents.</p>
-                
-                <h3>Available Tasks:</h3>
-                <ul>
-                    <li><strong>order_status_easy</strong> - Check order status (Easy)</li>
-                    <li><strong>refund_policy_medium</strong> - Explain refund policy (Medium)</li>
-                    <li><strong>address_change_hard</strong> - Change shipping address (Hard)</li>
-                    <li><strong>ambiguous_request</strong> - Handle moved address + missing package (Hard+)</li>
-                </ul>
+def home():
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customer Support RL | AI Agent Training Platform</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: radial-gradient(circle at 20% 30%, #0a0a1a, #050510);
+            min-height: 100vh;
+            color: #e2e8f0;
+            overflow-x: hidden;
+        }
+        
+        #particle-canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+            opacity: 0.5;
+        }
+        
+        .glass-header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(12px);
+            background: rgba(10, 10, 30, 0.7);
+            border-bottom: 1px solid rgba(139, 92, 246, 0.2);
+        }
+        
+        .header-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0.75rem 1.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .logo-area {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .logo-icon {
+            width: 2rem;
+            height: 2rem;
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
+            border-radius: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+        }
+        
+        .logo-icon svg { width: 1rem; height: 1rem; color: white; }
+        .logo-text h1 { font-size: 0.875rem; font-weight: 600; }
+        .logo-text p { font-size: 0.625rem; color: #94a3b8; }
+        
+        .status-area {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .model-badge {
+            background: rgba(139, 92, 246, 0.15);
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.375rem;
+            font-family: monospace;
+            font-size: 0.625rem;
+            border: 1px solid rgba(139, 92, 246, 0.3);
+        }
+        
+        .status-dot {
+            width: 0.5rem;
+            height: 0.5rem;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .status-online { background: #10b981; box-shadow: 0 0 8px #10b981; animation: pulse 2s infinite; }
+        .status-offline { background: #ef4444; }
+        .status-checking { background: #f59e0b; animation: pulse 1s infinite; }
+        
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        
+        .main-layout {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1.5rem;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .two-columns {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 1.5rem;
+        }
+        
+        @media (max-width: 768px) { .two-columns { grid-template-columns: 1fr; } }
+        
+        .task-item {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 1rem;
+            padding: 1rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-bottom: 0.75rem;
+        }
+        
+        .task-item:hover {
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(139, 92, 246, 0.3);
+            transform: translateY(-2px);
+        }
+        
+        .task-item.selected {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(99, 102, 241, 0.1));
+            border-color: #8b5cf6;
+        }
+        
+        .task-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        
+        .task-name { font-weight: 600; font-size: 0.9rem; }
+        .difficulty-tag {
+            font-size: 0.625rem;
+            padding: 0.125rem 0.5rem;
+            border-radius: 1rem;
+            font-weight: 500;
+        }
+        .diff-easy { background: #10b981; color: white; }
+        .diff-medium { background: #f59e0b; color: white; }
+        .diff-hard { background: #ef4444; color: white; }
+        .diff-hardplus { background: #8b5cf6; color: white; }
+        
+        .task-desc { font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.5rem; }
+        .task-meta { display: flex; gap: 0.75rem; font-size: 0.625rem; color: #64748b; }
+        
+        .control-panel {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 1rem;
+            padding: 1.25rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .btn-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 0;
+        }
+        
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-size: 0.75rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.375rem;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
+            color: white;
+        }
+        .btn-primary:hover:not(:disabled) { opacity: 0.9; transform: scale(1.02); }
+        
+        .btn-outline {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #e2e8f0;
+        }
+        .btn-outline:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
+        
+        .btn-expert {
+            border-color: #f59e0b;
+            color: #f59e0b;
+        }
+        .btn-expert:hover:not(:disabled) { background: rgba(245, 158, 11, 0.1); }
+        
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        /* FIXED SCORE RING - COMPLETE CIRCLE */
+        .score-ring-container {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 1rem;
+        }
+        
+        .score-ring {
+            position: relative;
+            width: 140px;
+            height: 140px;
+        }
+        
+        .score-ring svg {
+            width: 100%;
+            height: 100%;
+            transform: rotate(-90deg);
+        }
+        
+        .score-ring-bg {
+            stroke: rgba(255, 255, 255, 0.08);
+            fill: none;
+            stroke-width: 10;
+        }
+        
+        .score-ring-fill {
+            stroke: #8b5cf6;
+            fill: none;
+            stroke-width: 10;
+            stroke-linecap: round;
+            transition: stroke-dashoffset 0.6s ease;
+            filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.5));
+        }
+        
+        .score-ring-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+        
+        .score-number {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #8b5cf6;
+        }
+        
+        .score-max-text {
+            font-size: 0.7rem;
+            color: #64748b;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.75rem;
+            margin: 0;
+        }
+        
+        .stat-card {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 0.75rem;
+            padding: 0.75rem;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .stat-value { font-size: 1.25rem; font-weight: 700; }
+        .stat-label { font-size: 0.6rem; text-transform: uppercase; color: #64748b; margin-top: 0.25rem; }
+        
+        .reward-chart {
+            display: flex;
+            align-items: flex-end;
+            gap: 0.25rem;
+            height: 50px;
+            margin: 0.5rem 0;
+        }
+        
+        .chart-bar {
+            flex: 1;
+            background: linear-gradient(180deg, #10b981, #059669);
+            border-radius: 2px 2px 0 0;
+            transition: height 0.3s ease;
+        }
+        
+        .chart-bar.negative { background: linear-gradient(180deg, #ef4444, #dc2626); }
+        
+        .timeline {
+            max-height: 400px;
+            overflow-y: auto;
+            margin-top: 0;
+        }
+        
+        .timeline-item {
+            padding: 0.75rem;
+            border-left: 2px solid #8b5cf6;
+            margin-bottom: 0.75rem;
+            background: rgba(255, 255, 255, 0.02);
+            border-radius: 0.5rem;
+        }
+        
+        .timeline-item.expert { border-left-color: #f59e0b; background: rgba(245, 158, 11, 0.05); }
+        
+        .timeline-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+            font-size: 0.7rem;
+        }
+        
+        .reward-positive { color: #10b981; }
+        .reward-negative { color: #ef4444; }
+        
+        .timeline-action {
+            font-family: monospace;
+            font-size: 0.65rem;
+            color: #94a3b8;
+            word-break: break-all;
+        }
+        
+        .timeline-explanation { font-size: 0.65rem; color: #64748b; margin-top: 0.25rem; }
+        .timeline-state { font-size: 0.6rem; color: #475569; margin-top: 0.25rem; }
+        
+        .section-title {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #64748b;
+            margin-bottom: 0.75rem;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #64748b;
+        }
+        
+        .spinner {
+            width: 1rem;
+            height: 1rem;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        .task-header-card {
+            padding: 1rem;
+            border-radius: 1rem;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.08);
+        }
+        
+        .progress-bar-container {
+            height: 8px;
+            border-radius: 6px;
+            background: rgba(255,255,255,0.1);
+            margin-top: 0.75rem;
+            overflow: hidden;
+        }
+        
+        .progress-bar-fill {
+            height: 100%;
+            border-radius: 6px;
+            background: linear-gradient(90deg, #10b981, #22c55e);
+            transition: width 0.3s ease;
+        }
+        
+        .completion-message {
+            margin-bottom: 0.75rem;
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            font-size: 0.75rem;
+            text-align: center;
+            background: rgba(139, 92, 246, 0.1);
+            border: 1px solid rgba(139, 92, 246, 0.3);
+            color: #e2e8f0;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="particle-canvas"></canvas>
+    
+    <header class="glass-header">
+        <div class="header-container">
+            <div class="logo-area">
+                <div class="logo-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                </div>
+                <div class="logo-text">
+                    <h1>Customer Support RL</h1>
+                    <p>Reinforcement Learning Simulator</p>
+                </div>
+            </div>
+            <div class="status-area" id="status-area"></div>
+        </div>
+    </header>
+    
+    <main class="main-layout">
+        <div class="two-columns">
+            <div>
+                <div class="section-title">TRAINING TASKS</div>
+                <div id="tasks-container"></div>
             </div>
             
-            <div class="card">
-                <h2>OpenEnv API Endpoints</h2>
-                <div class="endpoint"><code>POST /openenv/reset</code> - Reset environment</div>
-                <div class="endpoint"><code>POST /openenv/step</code> - Take an action</div>
-                <div class="endpoint"><code>GET /openenv/state</code> - Get current state</div>
-                <div class="endpoint"><code>GET /openenv/tasks</code> - List tasks</div>
-                <div class="endpoint"><code>GET /openenv/validate</code> - Validate OpenEnv compliance</div>
-            </div>
-            
-            <div class="card">
-                <h2>Quick Start</h2>
-                <pre>
-import requests
-
-# Reset environment
-resp = requests.post("https://your-space.hf.space/openenv/reset")
-session = resp.json()
-
-# Take a step
-action = {"action_type": "lookup_order", "order_id": "12345"}
-resp = requests.post("https://your-space.hf.space/openenv/step", json=action)
-result = resp.json()
-                </pre>
+            <div>
+                <div class="control-panel">
+                    <div id="task-header-card"></div>
+                    <div id="stats-container"></div>
+                    <div id="controls-container"></div>
+                    <div id="performance-container"></div>
+                    <div class="section-title">STEP TIMELINE</div>
+                    <div id="timeline-container" class="timeline"></div>
+                </div>
             </div>
         </div>
-    </body>
-    </html>
+    </main>
+    
+    <script>
+        const API_BASE = window.location.origin;
+        
+        let tasks = [];
+        let selectedTask = null;
+        let sessionId = null;
+        let steps = [];
+        let score = 0;
+        let maxScore = 1;
+        let done = false;
+        let perfect = false;
+        let completionMsg = null;
+        let loading = false;
+        let online = null;
+        let aiModel = "";
+        
+        // Particle animation
+        (function initParticles() {
+            const canvas = document.getElementById('particle-canvas');
+            const ctx = canvas.getContext('2d');
+            let particles = [];
+            
+            function resize() {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+            }
+            
+            function createParticles() {
+                particles = [];
+                for (let i = 0; i < 80; i++) {
+                    particles.push({
+                        x: Math.random() * canvas.width,
+                        y: Math.random() * canvas.height,
+                        vx: (Math.random() - 0.5) * 0.3,
+                        vy: (Math.random() - 0.5) * 0.3,
+                        size: Math.random() * 2 + 0.5,
+                        alpha: Math.random() * 0.3 + 0.1
+                    });
+                }
+            }
+            
+            function draw() {
+                if (!ctx) return;
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                particles.forEach(p => {
+                    p.x += p.vx;
+                    p.y += p.vy;
+                    if (p.x < 0 || p.x > canvas.width) p.vx *= -1;
+                    if (p.y < 0 || p.y > canvas.height) p.vy *= -1;
+                    
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(139, 92, 246, ${p.alpha})`;
+                    ctx.fill();
+                });
+                
+                for (let i = 0; i < particles.length; i++) {
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const dx = particles[i].x - particles[j].x;
+                        const dy = particles[i].y - particles[j].y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist < 100) {
+                            ctx.beginPath();
+                            ctx.moveTo(particles[i].x, particles[i].y);
+                            ctx.lineTo(particles[j].x, particles[j].y);
+                            ctx.strokeStyle = `rgba(139, 92, 246, ${0.05 * (1 - dist / 100)})`;
+                            ctx.lineWidth = 0.5;
+                            ctx.stroke();
+                        }
+                    }
+                }
+                
+                requestAnimationFrame(draw);
+            }
+            
+            window.addEventListener('resize', () => {
+                resize();
+                createParticles();
+            });
+            resize();
+            createParticles();
+            draw();
+        })();
+        
+        async function fetchTasks() {
+            try {
+                const res = await fetch(`${API_BASE}/tasks`);
+                const data = await res.json();
+                tasks = data.tasks || [];
+                renderTasks();
+            } catch(e) { console.error(e); }
+        }
+        
+        async function fetchHealth() {
+            try {
+                const res = await fetch(`${API_BASE}/health`);
+                const data = await res.json();
+                online = true;
+                aiModel = data.ai_model || "";
+                renderStatus();
+            } catch(e) {
+                online = false;
+                renderStatus();
+            }
+        }
+        
+        async function resetTask(taskId, taskMaxScore) {
+            if (loading) return;
+            loading = true;
+            renderControls();
+            try {
+                const res = await fetch(`${API_BASE}/reset/${taskId}`);
+                const data = await res.json();
+                sessionId = data.session_id;
+                steps = [];
+                score = 0;
+                maxScore = data.max_score || taskMaxScore;
+                done = false;
+                perfect = false;
+                completionMsg = null;
+                renderHeaderCard();
+                renderStats();
+                renderPerformance();
+                renderTimeline();
+                renderControls();
+            } catch(e) { alert("Reset error: " + e.message); }
+            finally { loading = false; renderControls(); }
+        }
+        
+        async function takeStep(useExpert = false) {
+            if (!sessionId || done || loading) return;
+            loading = true;
+            renderControls();
+            try {
+                const res = await fetch(`${API_BASE}/step_ai`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId, use_expert: useExpert })
+                });
+                const data = await res.json();
+                steps.unshift(data);
+                score = data.score;
+                maxScore = data.max_score;
+                done = data.done;
+                perfect = data.perfect_completion;
+                completionMsg = data.completion_message;
+                renderStats();
+                renderPerformance();
+                renderTimeline();
+                renderControls();
+            } catch(e) { alert("Step error: " + e.message); }
+            finally { loading = false; renderControls(); }
+        }
+        
+        // FIXED: Force FULL UI reset when switching tasks
+        function selectTask(task) {
+            selectedTask = task;
+            sessionId = null;
+            steps = [];
+            score = 0;
+            maxScore = task.max_score ?? 1;
+            done = false;
+            perfect = false;
+            completionMsg = null;
+            
+            // 🔥 CLEAR UI manually
+            document.getElementById('stats-container').innerHTML = '';
+            document.getElementById('performance-container').innerHTML = '';
+            document.getElementById('timeline-container').innerHTML =
+                '<div class="empty-state">No steps yet. Click "Start Session" then "Step AI" to begin training.</div>';
+            
+            renderTasks();
+            renderHeaderCard();
+            renderControls();
+        }
+        
+        function renderHeaderCard() {
+            const container = document.getElementById('task-header-card');
+            if (!container || !selectedTask) return;
+            
+            let diffClass = '';
+            if (selectedTask.difficulty === 'easy') diffClass = 'diff-easy';
+            else if (selectedTask.difficulty === 'medium') diffClass = 'diff-medium';
+            else if (selectedTask.difficulty === 'hard') diffClass = 'diff-hard';
+            else diffClass = 'diff-hardplus';
+            
+            container.innerHTML = `
+                <div class="task-header-card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <div style="font-weight:600;font-size:1rem;">
+                                ${selectedTask.name}
+                            </div>
+                            <div style="font-size:0.75rem;color:#94a3b8;">
+                                ${selectedTask.description}
+                            </div>
+                        </div>
+                        <span class="difficulty-tag ${diffClass}">
+                            ${selectedTask.difficulty.toUpperCase()}
+                        </span>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function renderStatus() {
+            const container = document.getElementById('status-area');
+            if (!container) return;
+            let html = '';
+            if (aiModel) html += `<span class="model-badge">${aiModel}</span>`;
+            if (online === true) html += `<div><span class="status-dot status-online"></span><span style="margin-left: 0.25rem; font-size: 0.7rem;">Online</span></div>`;
+            else if (online === false) html += `<div><span class="status-dot status-offline"></span><span style="margin-left: 0.25rem; font-size: 0.7rem;">Offline</span></div>`;
+            else html += `<div><span class="status-dot status-checking"></span><span style="margin-left: 0.25rem; font-size: 0.7rem;">Checking...</span></div>`;
+            container.innerHTML = html;
+        }
+        
+        function renderTasks() {
+            const container = document.getElementById('tasks-container');
+            if (!container) return;
+            if (tasks.length === 0) { container.innerHTML = '<div class="empty-state">Loading tasks...</div>'; return; }
+            
+            container.innerHTML = tasks.map(task => {
+                let diffClass = '';
+                if (task.difficulty === 'easy') diffClass = 'diff-easy';
+                else if (task.difficulty === 'medium') diffClass = 'diff-medium';
+                else if (task.difficulty === 'hard') diffClass = 'diff-hard';
+                else diffClass = 'diff-hardplus';
+                
+                return `
+                    <div class="task-item ${selectedTask?.task_id === task.task_id ? 'selected' : ''}" onclick='selectTask(${JSON.stringify(task)})'>
+                        <div class="task-header-row">
+                            <span class="task-name">${task.name}</span>
+                            <span class="difficulty-tag ${diffClass}">${task.difficulty.toUpperCase()}</span>
+                        </div>
+                        <div class="task-desc">${task.description}</div>
+                        <div class="task-meta">
+                            <span>⚡ ${task.max_steps} steps</span>
+                            <span>🎯 ${task.max_score} pts</span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        function renderControls() {
+            const container = document.getElementById('controls-container');
+            if (!container || !selectedTask) { if(container) container.innerHTML = ''; return; }
+            
+            container.innerHTML = `
+                <div class="btn-group">
+                    <button class="btn btn-outline" onclick="resetTask('${selectedTask.task_id}', ${selectedTask.max_score})" ${loading ? 'disabled' : ''}>
+                        🔄 ${sessionId ? 'Reset Session' : 'Start Session'}
+                    </button>
+                    ${sessionId && !done ? `
+                        <button class="btn btn-primary" onclick="takeStep(false)" ${loading ? 'disabled' : ''}>
+                            ${loading ? '<div class="spinner"></div>' : '🤖 Step AI'}
+                        </button>
+                        <button class="btn btn-outline btn-expert" onclick="takeStep(true)" ${loading ? 'disabled' : ''}>
+                            🎓 Ask Expert (-0.2)
+                        </button>
+                    ` : ''}
+                </div>
+            `;
+        }
+        
+        // FIXED: Stop rendering stats when no session
+        function renderStats() {
+            const container = document.getElementById('stats-container');
+            if (!container || !sessionId) {
+                if (container) container.innerHTML = '';
+                return;
+            }
+            
+            const expertCount = steps.filter(s => s.used_expert).length;
+            const progressPercent = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+            
+            container.innerHTML = `
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" style="color:#8b5cf6">${score.toFixed(2)}</div>
+                        <div class="stat-label">SCORE</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${steps.length}</div>
+                        <div class="stat-label">STEPS</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${progressPercent}%</div>
+                        <div class="stat-label">PROGRESS</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${expertCount}</div>
+                        <div class="stat-label">EXPERT USES</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        // FIXED: Stop rendering performance when no session
+        function renderPerformance() {
+            const container = document.getElementById('performance-container');
+            if (!container || !sessionId) {
+                if (container) container.innerHTML = '';
+                return;
+            }
+            
+            const percent = maxScore > 0 ? Math.min(score / maxScore, 1) : 0;
+            const radius = 60;
+            const circumference = 2 * Math.PI * radius;
+            const dashOffset = circumference * (1 - percent);
+            
+            container.innerHTML = `
+                <div>
+                    <div style="font-size:0.7rem;color:#64748b;margin-bottom:0.5rem;">PERFORMANCE</div>
+                    ${completionMsg ? `
+                        <div class="completion-message">
+                            ${completionMsg}
+                        </div>
+                    ` : ''}
+                    <div class="score-ring-container">
+                        <div class="score-ring">
+                            <svg viewBox="0 0 140 140">
+                                <circle class="score-ring-bg" cx="70" cy="70" r="60"/>
+                                <circle class="score-ring-fill" cx="70" cy="70" r="60"
+                                        stroke-dasharray="${circumference}"
+                                        stroke-dashoffset="${dashOffset}"/>
+                            </svg>
+                            <div class="score-ring-text">
+                                <div class="score-number">${score.toFixed(1)}</div>
+                                <div class="score-max-text">/ ${maxScore.toFixed(1)}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" style="width: ${percent * 100}%"></div>
+                    </div>
+                    <div class="reward-chart" id="reward-chart"></div>
+                </div>
+            `;
+            
+            const chartContainer = document.getElementById('reward-chart');
+            if (chartContainer && steps.length > 0) {
+                const recentSteps = [...steps].slice(0, 12);
+                const maxAbs = Math.max(...recentSteps.map(s => Math.abs(s.reward)), 0.5);
+                chartContainer.innerHTML = recentSteps.map(step => {
+                    const height = (Math.abs(step.reward) / maxAbs) * 40;
+                    return `<div class="chart-bar ${step.reward < 0 ? 'negative' : ''}" style="height: ${Math.max(height, 4)}px;"></div>`;
+                }).join('');
+            }
+        }
+        
+        function renderTimeline() {
+            const container = document.getElementById('timeline-container');
+            if (!container) return;
+            if (!sessionId || steps.length === 0) {
+                container.innerHTML = '<div class="empty-state">No steps yet. Click "Start Session" then "Step AI" to begin training.</div>';
+                return;
+            }
+            
+            container.innerHTML = steps.map(step => {
+                const rewardClass = step.reward >= 0 ? 'reward-positive' : 'reward-negative';
+                const expertClass = step.used_expert ? 'expert' : '';
+                return `
+                    <div class="timeline-item ${expertClass}">
+                        <div class="timeline-header">
+                            <span>Step ${step.step}</span>
+                            <span class="${rewardClass}">${step.reward >= 0 ? '+' : ''}${step.reward}</span>
+                        </div>
+                        <div class="timeline-action">Action: ${JSON.stringify(step.action)}</div>
+                        <div class="timeline-explanation">📖 ${step.reward_explanation}</div>
+                        ${step.state ? `<div class="timeline-state">📊 order_checked=${step.state.order_checked}, address_collected=${step.state.address_collected}, address_confirmed=${step.state.address_confirmed}</div>` : ''}
+                    </div>
+                `;
+            }).join('');
+        }
+        
+        async function init() {
+            await fetchHealth();
+            await fetchTasks();
+            renderStatus();
+            setInterval(() => { fetchHealth(); }, 30000);
+        }
+        
+        window.selectTask = selectTask;
+        window.resetTask = resetTask;
+        window.takeStep = takeStep;
+        
+        init();
+    </script>
+</body>
+</html>
     """
-
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7860)
