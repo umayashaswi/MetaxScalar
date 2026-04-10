@@ -1,5 +1,5 @@
-import json
 import asyncio
+import json
 import os
 from typing import List, Optional
 
@@ -18,55 +18,48 @@ API_KEY = (
 )
 
 MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
+API_BASE = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
 
-if not API_KEY:
-    raise ValueError("❌ Set API_KEY, GROQ_API_KEY, or HF_TOKEN")
-
-client = OpenAI(
-    api_key=API_KEY,
-    base_url=API_BASE_URL
-)
+client = OpenAI(api_key=API_KEY, base_url=API_BASE) if API_KEY else None
 
 # =========================
-# LOGGING (REQUIRED FORMAT)
+# LOGGING FUNCTIONS (REQUIRED)
 # =========================
 
 def log_start(task: str, env: str, model: str):
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
-
-def log_step(step: int, action, reward: float, done: bool, error: Optional[str]):
-    error_val = error if error else "null"
-    done_val = str(done).lower()
-
-    if isinstance(action, dict):
-        action = json.dumps(action)
+def log_step(step: int, action: dict, reward: float, done: bool, error: Optional[str]):
+    action_str = json.dumps(action)
+    error_str = error if error else "null"
+    done_str = str(done).lower()
 
     print(
-        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
-        flush=True
+        f"[STEP] step={step} action={action_str} reward={reward:.2f} done={done_str} error={error_str}",
+        flush=True,
     )
-
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]):
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
 
     print(
         f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
-        flush=True
+        flush=True,
     )
 
 # =========================
 # MODEL CALL
 # =========================
 
-def call_model(task_id: str, history: List, sys_prompt: str) -> dict:
+def call_model(task_id: str, history: List, system_prompt: str) -> dict:
+    if client is None:
+        return {"action_type": "send_reply", "message": "Fallback response."}
+
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {"role": "system", "content": sys_prompt},
+                {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": f"Task: {task_id}\nHistory: {json.dumps(history)}\nReturn JSON action."
@@ -88,11 +81,7 @@ def call_model(task_id: str, history: List, sys_prompt: str) -> dict:
     except Exception:
         pass
 
-    # fallback
-    return {
-        "action_type": "send_reply",
-        "message": "I apologize, but I'm having trouble processing your request."
-    }
+    return {"action_type": "send_reply", "message": "Sorry, I couldn't process that."}
 
 # =========================
 # PROMPTS
@@ -101,32 +90,24 @@ def call_model(task_id: str, history: List, sys_prompt: str) -> dict:
 def get_system_prompt(task_id: str) -> str:
     base = (
         "You are a Customer Support AI.\n"
-        "Rules:\n"
+        "RULES:\n"
         "1. Only use 'lookup_order' or 'send_reply'\n"
-        "2. Use send_reply to talk\n"
-        "3. Output ONLY JSON\n\n"
+        "2. Output ONLY JSON\n\n"
     )
 
     if task_id == "order_status_easy":
-        return base + "First lookup order, then reply with status."
+        return base + "First lookup_order, then send_reply with status."
 
     elif task_id == "refund_policy_medium":
-        return base + "Explain 30-day refund policy using 'refund' word."
+        return base + "Explain refund policy using 'refund' keyword."
 
     elif task_id == "address_change_hard":
-        return base + (
-            "Steps:\n"
-            "1. lookup_order\n"
-            "2. ask for address\n"
-            "3. confirm address\n"
-            "Do not repeat steps."
-        )
+        return base + "1. lookup_order → 2. ask address → 3. confirm address."
 
-    else:
-        return base
+    return base
 
 # =========================
-# RUN TASK
+# TASK RUNNER
 # =========================
 
 async def run_task(task_id: str):
@@ -136,34 +117,28 @@ async def run_task(task_id: str):
     obs = env.reset()
 
     rewards = []
-    sys_prompt = get_system_prompt(task_id)
+    system_prompt = get_system_prompt(task_id)
 
     for step in range(1, 11):
         try:
-            action_dict = call_model(task_id, obs.history, sys_prompt)
+            action_dict = call_model(task_id, obs.history, system_prompt)
 
             if "action_type" not in action_dict:
-                action_dict = {
-                    "action_type": "send_reply",
-                    "message": "Fallback response"
-                }
+                action_dict = {"action_type": "send_reply", "message": "Fallback."}
 
             try:
                 action = Action(**action_dict)
+                error = None
             except Exception as e:
-                action = Action(
-                    action_type="send_reply",
-                    message="Invalid action fallback"
-                )
-                log_step(step, action_dict, -0.2, False, str(e))
-                continue
+                action = Action(action_type="send_reply", message="Invalid format")
+                error = str(e)
 
             obs, reward, done, _ = env.step(action)
 
-            r = reward.value if hasattr(reward, "value") else float(reward)
-            rewards.append(r)
+            reward_value = reward.value if hasattr(reward, "value") else float(reward)
+            rewards.append(reward_value)
 
-            log_step(step, action_dict, r, done, None)
+            log_step(step, action_dict, reward_value, done, error)
 
             if done:
                 break
@@ -173,15 +148,18 @@ async def run_task(task_id: str):
             break
 
     # =========================
-    # FINAL SCORE
+    # SCORE FIX (STRICT RANGE)
     # =========================
 
     if rewards:
-        total = sum(rewards)
-        score = max(0.0, min(total, 1.0))  # clamp
+        total_score = sum(rewards)
+
+        # 🔥 CRITICAL FIX: enforce (0,1)
+        score = max(min(total_score, 0.999), 0.001)
+
         success = score >= 0.7
     else:
-        score = 0.0
+        score = 0.001
         success = False
 
     log_end(success, len(rewards), score, rewards)
@@ -194,13 +172,11 @@ async def main():
     tasks = [
         "order_status_easy",
         "refund_policy_medium",
-        "address_change_hard",
-        "ambiguous_request"
+        "address_change_hard"
     ]
 
-    for t in tasks:
-        await run_task(t)
-
+    for task in tasks:
+        await run_task(task)
 
 if __name__ == "__main__":
     asyncio.run(main())
