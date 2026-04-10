@@ -1,42 +1,55 @@
-name: customer-support-env
+name: customer-support-simulator
 version: 1.0.0
-description: Customer support environment with order status, refund policy, and address change tasks
-author: Your Name
-tags:
-  - customer-support
-  - conversational-ai
-  - multi-task
+description: Customer support simulation environment for training AI agents
 
 tasks:
   - id: order_status_easy
     name: Order Status Query
-    description: Agent must lookup order status using lookup_order action
+    description: Customer wants to check their order status
     difficulty: easy
-    max_steps: 3
-    
+    max_steps: 5
+    expected_reward: 1.0
+
   - id: refund_policy_medium
     name: Refund Policy Explanation
-    description: Agent must explain refund policy in a reply
+    description: Customer wants to know the refund policy
     difficulty: medium
-    max_steps: 3
-    
+    max_steps: 5
+    expected_reward: 1.0
+
   - id: address_change_hard
     name: Address Change Request
-    description: Agent must lookup order, ask for new address, and request confirmation
+    description: Customer wants to change their shipping address
     difficulty: hard
-    max_steps: 5
+    max_steps: 8
+    expected_reward: 1.0
+
+  - id: ambiguous_request
+    name: Moved & Missing Package
+    description: Customer issue with moved address and missing package
+    difficulty: hard+
+    max_steps: 10
+    expected_reward: 1.0
 
 action_space:
-  - action_type: lookup_order
-    parameters:
-      - order_id: string
-  - action_type: send_reply
-    parameters:
-      - message: string
+  type: object
+  properties:
+    action_type:
+      type: string
+      enum: ["lookup_order", "send_reply"]
+    order_id:
+      type: string
+      optional: true
+    message:
+      type: string
+      optional: true
 
 observation_space:
-  - task_id: string
-  - history: list
-  - done: boolean
-
-reward_range: [0.0, 1.0]
+  type: object
+  properties:
+    task_id:
+      type: string
+    history:
+      type: array
+    done:
+      type: boolean
