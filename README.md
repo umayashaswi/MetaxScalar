@@ -42,6 +42,7 @@ Agents interact via a structured action model with exactly **two primitive actio
 
 // Ask for address (still uses send_reply!)
 {"action_type": "send_reply", "message": "Please provide your new shipping address."}
+```
 ⚠️ Important: Agents must NOT invent new action types (e.g., ask_address, confirm_order). All communication with the customer happens through send_reply.
 
 ## Observation Space
