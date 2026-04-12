@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import re
 from typing import List, Optional
 
 from openai import OpenAI
@@ -21,10 +20,10 @@ API_KEY = (
 MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
 API_BASE = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
 
-client = OpenAI(api_key=API_KEY, base_url=API_BASE, timeout=10) if API_KEY else None
+client = OpenAI(api_key=API_KEY, base_url=API_BASE) if API_KEY else None
 
 # =========================
-# LOGGING FUNCTIONS
+# LOGGING FUNCTIONS (REQUIRED)
 # =========================
 
 def log_start(task: str, env: str, model: str):
@@ -49,7 +48,7 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]):
     )
 
 # =========================
-# SAFE MODEL CALL
+# MODEL CALL
 # =========================
 
 def call_model(task_id: str, history: List, system_prompt: str) -> dict:
@@ -63,30 +62,21 @@ def call_model(task_id: str, history: List, system_prompt: str) -> dict:
                 {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
-                    "content": f"""
-Task: {task_id}
-History: {json.dumps(history)}
-
-Return ONLY valid JSON:
-{{"action_type": "...", "message": "..."}}
-OR
-{{"action_type": "lookup_order", "order_id": "12345"}}
-"""
+                    "content": f"Task: {task_id}\nHistory: {json.dumps(history)}\nReturn JSON action."
                 }
             ],
             temperature=0.2,
-            max_tokens=120
+            max_tokens=150
         )
 
         content = response.choices[0].message.content.strip()
 
-        # ✅ SAFE JSON extraction
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except:
-                pass
+        # Extract JSON safely
+        start = content.find("{")
+        end = content.rfind("}") + 1
+
+        if start != -1 and end != 0:
+            return json.loads(content[start:end])
 
     except Exception:
         pass
@@ -102,15 +92,14 @@ def get_system_prompt(task_id: str) -> str:
         "You are a Customer Support AI.\n"
         "RULES:\n"
         "1. Only use 'lookup_order' or 'send_reply'\n"
-        "2. Output ONLY valid JSON\n"
-        "3. Follow correct sequence strictly\n\n"
+        "2. Output ONLY JSON\n\n"
     )
 
     if task_id == "order_status_easy":
-        return base + "Step1: lookup_order → Step2: send_reply."
+        return base + "First lookup_order, then send_reply with status."
 
     elif task_id == "refund_policy_medium":
-        return base + "send_reply must include the word 'refund'."
+        return base + "Explain refund policy using 'refund' keyword."
 
     elif task_id == "address_change_hard":
         return base + "1. lookup_order → 2. ask address → 3. confirm address."
@@ -130,32 +119,9 @@ async def run_task(task_id: str):
     rewards = []
     system_prompt = get_system_prompt(task_id)
 
-    for step in range(1, 7):  # ✅ reduced steps
+    for step in range(1, 11):
         try:
-
-            # =========================
-            # RULE-BASED ACTIONS (CRITICAL FOR SCORE)
-            # =========================
-
-            if task_id == "order_status_easy":
-                if step == 1:
-                    action_dict = {"action_type": "lookup_order", "order_id": "12345"}
-                else:
-                    action_dict = {"action_type": "send_reply", "message": "Your order is being processed."}
-
-            elif task_id == "refund_policy_medium":
-                action_dict = {"action_type": "send_reply", "message": "We offer a 30-day refund policy."}
-
-            elif task_id == "address_change_hard":
-                if step == 1:
-                    action_dict = {"action_type": "lookup_order", "order_id": "12345"}
-                elif step == 2:
-                    action_dict = {"action_type": "send_reply", "message": "Please provide your new address."}
-                else:
-                    action_dict = {"action_type": "send_reply", "message": "Please confirm your address."}
-
-            else:
-                action_dict = call_model(task_id, obs.history, system_prompt)
+            action_dict = call_model(task_id, obs.history, system_prompt)
 
             if "action_type" not in action_dict:
                 action_dict = {"action_type": "send_reply", "message": "Fallback."}
@@ -182,12 +148,15 @@ async def run_task(task_id: str):
             break
 
     # =========================
-    # SCORE FIX
+    # SCORE FIX (STRICT RANGE)
     # =========================
 
     if rewards:
         total_score = sum(rewards)
+
+        # 🔥 CRITICAL FIX: enforce (0,1)
         score = max(min(total_score, 0.999), 0.001)
+
         success = score >= 0.7
     else:
         score = 0.001
