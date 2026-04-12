@@ -17,19 +17,14 @@ from openai import OpenAI
 # CONFIG
 # =========================
 
-API_KEY = (
-    os.getenv("GROQ_API_KEY")
-    or os.getenv("OPENAI_API_KEY")
-    or os.getenv("HF_TOKEN")
-)
+API_KEY = os.environ.get("API_KEY")
+API_BASE = os.environ.get("API_BASE_URL")
 
-MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.1-8b-instant")
-API_BASE = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
-
-client = OpenAI(api_key=API_KEY, base_url=API_BASE) if API_KEY else None
-
-print(f"🤖 AI Model: {MODEL_NAME}")
-print(f"🔑 API Key configured: {bool(API_KEY)}")
+if not API_KEY or not API_BASE:
+    print("❌ Missing API_KEY or API_BASE_URL from environment")
+    client = None
+else:
+    client = OpenAI(api_key=API_KEY, base_url=API_BASE)
 
 # =========================
 # APP
