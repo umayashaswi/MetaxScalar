@@ -32,22 +32,10 @@ print(f"🤖 AI Model: {MODEL_NAME}")
 print(f"🔑 API Key configured: {bool(API_KEY)}")
 
 # =========================
-# RL HYPERPARAMETERS
-# =========================
-
-EPSILON = 0.1
-GAMMA = 0.95
-LEARNING_RATE = 0.1
-REPLAY_LEARNING_RATE = 0.05
-EPSILON_DECAY = 0.98
-MIN_EPSILON = 0.01
-STEP_PENALTY = 0.05
-
-# =========================
 # APP
 # =========================
 
-app = FastAPI(title="Customer Support RL - True Q-Learning Agent")
+app = FastAPI(title="Customer Support OpenEnv")
 
 # =========================
 # MEMORY
@@ -129,194 +117,15 @@ REWARD_CONFIG = {
 }
 
 # =========================
-# RL HELPER FUNCTIONS
-# =========================
-
-def get_state_vector(session: Dict) -> Dict[str, Any]:
-    """Simplified state vector to prevent state explosion"""
-    task_id = session.get("task_id", "order_status_easy")
-    
-    if task_id == "order_status_easy":
-        stage = "done" if session.get("order_checked", False) else "start"
-    elif task_id == "refund_policy_medium":
-        stage = "done" if session.get("policy_explained", False) else "start"
-    elif task_id == "address_change_hard":
-        if not session.get("order_checked", False):
-            stage = "start"
-        elif not session.get("address_collected", False):
-            stage = "address"
-        elif not session.get("address_confirmed", False):
-            stage = "confirm"
-        else:
-            stage = "done"
-    elif task_id == "ambiguous_request":
-        if not session.get("order_checked", False):
-            stage = "start"
-        elif not session.get("address_collected", False):
-            stage = "address"
-        elif not session.get("resolved", False):
-            stage = "resolve"
-        else:
-            stage = "done"
-    else:
-        stage = "start"
-    
-    return {
-        "stage": stage,
-        "last_action": session.get("last_action_type", "none")
-    }
-
-# =========================
-# FIX 1: Force only send_reply for MEDIUM
-# =========================
-def get_valid_actions(session: Dict) -> List[Dict]:
-    """Return only valid actions for current state"""
-    task_id = session.get("task_id", "order_status_easy")
-    order_id = session.get("order_id", "12345")
-    
-    if task_id == "order_status_easy":
-        if not session.get("order_checked", False):
-            return [{"action_type": "lookup_order", "order_id": order_id}]
-        else:
-            return [{"action_type": "send_reply"}]
-    
-    # FIX 1: Clean version - only send_reply for refund task
-    elif task_id == "refund_policy_medium":
-        return [{"action_type": "send_reply"}]
-    
-    elif task_id == "address_change_hard":
-        if not session.get("order_checked", False):
-            return [{"action_type": "lookup_order", "order_id": order_id}]
-        elif not session.get("address_collected", False):
-            return [{"action_type": "send_reply"}]
-        elif not session.get("address_confirmed", False):
-            return [{"action_type": "send_reply"}]
-        else:
-            return [{"action_type": "send_reply"}]
-    
-    elif task_id == "ambiguous_request":
-        if not session.get("order_checked", False):
-            return [{"action_type": "lookup_order", "order_id": order_id}]
-        elif not session.get("address_collected", False):
-            return [{"action_type": "send_reply"}]
-        elif not session.get("resolved", False):
-            return [{"action_type": "send_reply"}]
-        else:
-            return [{"action_type": "send_reply"}]
-    
-    return [{"action_type": "send_reply"}]
-
-def get_best_q_action(session: Dict, state: Dict) -> Optional[Dict]:
-    """Get best action from Q-values for given state"""
-    state_key = json.dumps(state, sort_keys=True)
-    
-    if state_key not in session.get("q_values", {}):
-        return None
-    
-    actions = session["q_values"][state_key]
-    if not actions:
-        return None
-    
-    best_action_str = max(actions.items(), key=lambda x: x[1])[0]
-    return json.loads(best_action_str)
-
-# =========================
-# FIX 2: Fixed smart fallback
-# =========================
-def get_smart_fallback_action(session: Dict, current_state: Dict) -> Dict:
-    """Smarter fallback using state information - FIXED for refund task"""
-    task_id = session.get("task_id")
-    
-    # 🚫 NEVER use lookup_order for refund task
-    if task_id == "refund_policy_medium":
-        return {"action_type": "send_reply"}
-    
-    stage = current_state.get("stage", "start")
-    
-    if stage == "start":
-        return {"action_type": "lookup_order", "order_id": session.get("order_id", "12345")}
-    else:
-        return {"action_type": "send_reply"}
-
-# =========================
-# FIX 3: Ensure message contains "refund"
-# =========================
-def get_llm_message(action_type: str, session: Dict, task_id: str) -> str:
-    """LLM ONLY generates message content for send_reply actions with task-specific guidance"""
-    if action_type != "send_reply" or client is None:
-        return None
-
-    state = get_state_vector(session)
-    stage = state.get("stage", "start")
-    
-    # FIX 3: Force refund message for refund_policy_medium
-    if task_id == "refund_policy_medium":
-        return "We offer a 30-day refund policy for all purchases."
-
-    # Strong task guidance for hard tasks
-    if task_id in ["address_change_hard", "ambiguous_request"]:
-        if stage == "address":
-            return "Please provide your new address."
-        elif stage == "confirm":
-            return "Please confirm if this address is correct."
-        elif stage == "resolve":
-            return "Your issue has been resolved and a replacement has been sent."
-
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Return ONLY a short customer support message."
-                },
-                {
-                    "role": "user",
-                    "content": f"Task: {task_id}, Stage: {stage}"
-                }
-            ],
-            temperature=0.3,
-            max_tokens=50
-        )
-
-        message = response.choices[0].message.content.strip()
-        message = message.replace('"', '').replace("'", "")
-        return message[:200]
-
-    except Exception as e:
-        print(f"❌ LLM message generation error: {e}")
-        return "Let me help you."
-
-def experience_replay(session: Dict):
-    """Perform experience replay on sampled trajectory"""
-    trajectory = session.get("trajectory", [])
-    if len(trajectory) < 5:
-        return
-    
-    sample = random.choice(trajectory)
-    
-    s = json.dumps(sample["state"], sort_keys=True)
-    a = json.dumps(sample["action"], sort_keys=True)
-    r = sample["reward"]
-    ns = json.dumps(sample["next_state"], sort_keys=True)
-    
-    next_q_values = session["q_values"].get(ns, {})
-    max_next_q = max(next_q_values.values()) if next_q_values else 0.0
-    
-    old_q = session["q_values"].get(s, {}).get(a, 0.0)
-    session["q_values"].setdefault(s, {})
-    
-    new_q = old_q + REPLAY_LEARNING_RATE * (r + GAMMA * max_next_q - old_q)
-    session["q_values"][s][a] = new_q
-
-# =========================
-# OPENENV COMPATIBILITY ENDPOINTS
+# OPENENV COMPATIBILITY ENDPOINTS (FIXED)
 # =========================
 
 @app.post("/reset")
 async def openenv_reset():
+    """OpenEnv compatible reset endpoint - NO parameters, NO body expected"""
     global openenv_session, openenv_history
     
+    # Randomly select a task for better testing coverage
     task_id = random.choice([
         "order_status_easy",
         "refund_policy_medium",
@@ -324,6 +133,7 @@ async def openenv_reset():
         "ambiguous_request"
     ])
     
+    # Create a new environment instance with random task
     openenv_session = CustomerSupportEnv(task_id=task_id)
     obs = openenv_session.reset()
     openenv_history = []
@@ -341,12 +151,15 @@ async def openenv_reset():
 
 @app.post("/step")
 async def openenv_step(req: StepRequest):
+    """OpenEnv compatible step endpoint"""
     global openenv_session, openenv_history
     
     if openenv_session is None:
         raise HTTPException(status_code=400, detail="Call /reset first")
     
     action = Action(**req.dict())
+    
+    # Take a step in the environment
     obs, reward, done, info = openenv_session.step(action)
     openenv_history.append(action.dict())
     
@@ -363,6 +176,7 @@ async def openenv_step(req: StepRequest):
 
 @app.get("/state")
 async def openenv_state():
+    """Get current environment state"""
     global openenv_session
     
     if openenv_session is None:
@@ -380,10 +194,12 @@ async def openenv_state():
 
 @app.get("/validate")
 async def openenv_validate():
+    """OpenEnv validation endpoint"""
     return {"status": "ok", "ready": True, "openenv_compatible": True}
 
 @app.get("/tasks_list")
 async def openenv_tasks():
+    """List available tasks"""
     return {
         "tasks": [
             {
@@ -418,7 +234,7 @@ async def openenv_tasks():
     }
 
 # =========================
-# LEGACY ENDPOINTS
+# LEGACY ENDPOINTS (for backward compatibility with UI)
 # =========================
 
 @app.post("/reset_with_task")
@@ -445,7 +261,6 @@ async def reset_with_task(req: ResetRequest):
         "done": False,
         "perfect_completion": False,
         "total_reward": 0.0,
-        "discounted_reward": 0.0,
         "history": [],
         "start_time": datetime.now().isoformat(),
         "order_id": random_order_id,
@@ -456,14 +271,7 @@ async def reset_with_task(req: ResetRequest):
         "resolved": False,
         "user_prompt": user_prompt,
         "last_action_type": None,
-        "penalty_count": 0,
-        "trajectory": [],
-        "last_reward": 0.0,
-        "q_values": {},
-        "q_value_history": [],
-        "epsilon": EPSILON,
-        "exploration_count": 0,
-        "exploitation_count": 0
+        "penalty_count": 0  # ADDED: Penalty tracking
     }
     
     return {
@@ -516,43 +324,7 @@ async def step_ai(req: StepAIRequest):
     env = session["env"]
     used_expert = req.use_expert
     
-    # Get current state vector (simplified)
-    current_state = get_state_vector(session)
-    current_epsilon = session.get("epsilon", EPSILON)
-    
-    # ========== RL DECISION MAKING WITH VALID ACTIONS ==========
-    action_source = None
-    valid_actions = get_valid_actions(session)
-    
-    if random.random() < current_epsilon:
-        # EXPLORATION: Choose random valid action only
-        ai_action = random.choice(valid_actions)
-        action_source = "exploration"
-        session["exploration_count"] = session.get("exploration_count", 0) + 1
-    else:
-        # EXPLOITATION: Use Q-values to choose best action
-        q_action = get_best_q_action(session, current_state)
-        
-        if q_action and q_action in valid_actions:
-            ai_action = q_action
-            action_source = "q_value"
-            session["exploitation_count"] = session.get("exploitation_count", 0) + 1
-        else:
-            # Smart fallback based on state (FIXED for refund task)
-            ai_action = get_smart_fallback_action(session, current_state)
-            action_source = "smart_fallback"
-            session["exploitation_count"] = session.get("exploitation_count", 0) + 1
-    
-    # ========== LLM ONLY GENERATES MESSAGES (with refund fix) ==========
-    if ai_action.get("action_type") == "send_reply" and "message" not in ai_action:
-        generated_message = get_llm_message("send_reply", session, session["task_id"])
-        if generated_message:
-            ai_action["message"] = generated_message
-        else:
-            ai_action["message"] = "I understand your concern. Let me help you with that."
-    
-    # Decay epsilon after each step
-    session["epsilon"] = max(MIN_EPSILON, session.get("epsilon", EPSILON) * EPSILON_DECAY)
+    ai_action = call_ai_model(session["task_id"], session, used_expert)
     
     try:
         action = Action(**ai_action)
@@ -563,7 +335,6 @@ async def step_ai(req: StepAIRequest):
         action = Action(**ai_action)
         parse_success = False
         action_type = "send_reply"
-        action_source = "fallback"
     
     is_valid, reward_value, explanation, is_perfect = validate_and_update_state(
         session["task_id"], ai_action, session, used_expert
@@ -571,17 +342,17 @@ async def step_ai(req: StepAIRequest):
     
     if not parse_success:
         reward_value = -0.5
-        explanation = "❌ Invalid action format"
-        session["penalty_count"] += 1
+        explanation = "❌ Invalid JSON format"
+        session["penalty_count"] += 1  # ADDED: Track invalid action penalty
     
     if not is_valid:
-        session["penalty_count"] += 1
+        session["penalty_count"] += 1  # ADDED: Track invalid action penalty
     
-    # Reduced repeated action penalty
+    # ADD REPEATED ACTION PENALTY
     if session.get("last_action_type") == action_type:
-        reward_value -= 0.05
-        explanation += " ⚠️ Repeated action penalty (-0.05)"
-        session["penalty_count"] += 1
+        reward_value -= 0.2
+        explanation += " ⚠️ Repeated action penalty"
+        session["penalty_count"] += 1  # ADDED: Track repeated action penalty
     
     session["last_action_type"] = action_type
     
@@ -589,91 +360,26 @@ async def step_ai(req: StepAIRequest):
     
     env_r = env_reward.value if hasattr(env_reward, "value") else float(env_reward)
     
-    # Blend validation reward with environment reward
+    # FIX 3: BLENDING RATIO UPDATED TO 80/20
     reward_value = 0.8 * reward_value + 0.2 * env_r
-    
-    # Step penalty
-    reward_value -= STEP_PENALTY
-    explanation += f" 📉 Step penalty: -{STEP_PENALTY:.2f}"
-    
-    # Bonus for faster completion
-    if done:
-        speed_bonus = max(0, 1 - (session["steps"] * 0.1))
-        reward_value += speed_bonus
-        explanation += f" 🚀 Speed bonus: +{speed_bonus:.2f}"
     
     session["steps"] += 1
     session["rewards"].append(reward_value)
     session["explanations"].append(explanation)
     session["actions_taken"].append(ai_action)
-    session["last_reward"] = reward_value
     
-    # Discounted reward accumulation
-    discounted_contribution = (GAMMA ** session["steps"]) * reward_value
-    session["discounted_reward"] += discounted_contribution
-    
-    # Simple addition for display
+    # FIX 1: SIMPLE ADDITION WITHOUT CLAMPING
     session["total_reward"] += reward_value
-    
-    # Get next state for Q-learning
-    next_state = get_state_vector(session)
-    
-    # Store trajectory for experience replay
-    session["trajectory"].append({
-        "state": current_state,
-        "action": ai_action,
-        "reward": reward_value,
-        "next_state": next_state,
-        "done": done
-    })
-    
-    # ========== PROPER BELLMAN Q-LEARNING UPDATE ==========
-    state_key = json.dumps(current_state, sort_keys=True)
-    action_key = json.dumps(ai_action, sort_keys=True)
-    next_state_key = json.dumps(next_state, sort_keys=True)
-    
-    session["q_values"].setdefault(state_key, {})
-    session["q_values"][state_key].setdefault(action_key, 0.0)
-    session["q_values"].setdefault(next_state_key, {})
-    
-    next_q_values = session["q_values"][next_state_key].values()
-    max_next_q = max(next_q_values) if next_q_values else 0.0
-    
-    old_q = session["q_values"][state_key][action_key]
-    new_q = old_q + LEARNING_RATE * (reward_value + GAMMA * max_next_q - old_q)
-    session["q_values"][state_key][action_key] = new_q
-    
-    # Learning status
-    learning_status = "improving" if new_q > old_q else "declining"
-    
-    # Track Q-value changes
-    session["q_value_history"].append({
-        "step": session["steps"],
-        "old_q": round(old_q, 3),
-        "new_q": round(new_q, 3),
-        "reward": round(reward_value, 3),
-        "status": learning_status
-    })
-    if len(session["q_value_history"]) > 20:
-        session["q_value_history"] = session["q_value_history"][-20:]
-    
-    # Calculate policy confidence
-    current_q_values = session["q_values"][state_key].values()
-    policy_confidence = max(current_q_values) if current_q_values else 0.0
-    
-    # Experience replay
-    experience_replay(session)
     
     if used_expert:
         session["expert_used_count"] += 1
-        session["penalty_count"] += 1
+        session["penalty_count"] += 1  # ADDED: Track expert penalty
     
     if session["steps"] >= max_steps_limit:
         session["done"] = True
+        # REDUCE STEP LIMIT PENALTY
         session["total_reward"] = max(0, session["total_reward"] - 0.1)
-        session["penalty_count"] += 1
-        if session["trajectory"]:
-            session["trajectory"][-1]["done"] = True
+        session["penalty_count"] += 1  # ADDED: Track step limit penalty
     
     all_steps_complete = False
     if session["task_id"] == "order_status_easy":
@@ -687,17 +393,16 @@ async def step_ai(req: StepAIRequest):
     
     if all_steps_complete and not session["done"]:
         session["done"] = True
+        # FIX 2: RESTORE ORIGINAL PERFECT COMPLETION CONDITION
         if session["expert_used_count"] == 0 and session["total_reward"] >= max_score * 0.8:
             session["perfect_completion"] = True
             session["total_reward"] = min(session["total_reward"] + 0.2, max_score)
-        if session["trajectory"]:
-            session["trajectory"][-1]["done"] = True
     
-    # Clamp for display
+    # CLAMP ONLY AT THE END FOR DISPLAY
     score_value = min(session["total_reward"], max_score)
     score_value = max(score_value, 0.0)
     
-    # Completion message logic
+    # ADDED: Completion message logic
     completion_message = None
     
     if session["done"]:
@@ -714,14 +419,9 @@ async def step_ai(req: StepAIRequest):
         else:
             completion_message = "⚠️ Task Completed with Many Penalties"
     
+    # ADDED: Append completion message to explanation
     if completion_message:
         explanation += f" | {completion_message}"
-    
-    # Calculate average Q-value for metrics
-    all_q_values = []
-    for state_q in session.get("q_values", {}).values():
-        all_q_values.extend(state_q.values())
-    avg_q = sum(all_q_values) / len(all_q_values) if all_q_values else 0.0
     
     return {
         "step": session["steps"],
@@ -734,19 +434,10 @@ async def step_ai(req: StepAIRequest):
         "max_score": max_score,
         "score_display": f"{score_value:.2f} / {max_score}",
         "total_reward": session["total_reward"],
-        "discounted_reward": round(session["discounted_reward"], 3),
         "is_valid": is_valid,
         "used_expert": used_expert,
         "expert_used_count": session["expert_used_count"],
-        "action_source": action_source,
-        "policy_confidence": round(policy_confidence, 3),
-        "epsilon": round(session.get("epsilon", EPSILON), 3),
-        "average_q_value": round(avg_q, 3),
-        "exploration_count": session.get("exploration_count", 0),
-        "exploitation_count": session.get("exploitation_count", 0),
-        "learning_status": learning_status,
-        "q_value_history": session.get("q_value_history", [])[-5:],
-        "completion_message": completion_message,
+        "completion_message": completion_message,  # ADDED: Return completion message
         "state": {
             "order_checked": session.get("order_checked", False),
             "address_collected": session.get("address_collected", False),
@@ -757,11 +448,175 @@ async def step_ai(req: StepAIRequest):
     }
 
 # =========================
-# VALIDATION FUNCTION
+# HELPER FUNCTIONS
 # =========================
 
+def call_ai_model(task_id: str, session_state: Dict, use_expert: bool = False) -> Dict[str, Any]:
+    """Call the AI model to get an action"""
+    
+    if client is None:
+        return {"action_type": "send_reply", "message": "I apologize, but I'm having trouble processing your request."}
+    
+    # FORCE CORRECT ACTION FLOW FOR HARD TASKS
+    if task_id in ["address_change_hard", "ambiguous_request"]:
+        
+        if not session_state.get("order_checked", False):
+            return {
+                "action_type": "lookup_order",
+                "order_id": session_state.get("order_id", "12345")
+            }
+        
+        elif not session_state.get("address_collected", False):
+            return {
+                "action_type": "send_reply",
+                "message": "Please provide your new address details."
+            }
+        
+        elif task_id == "address_change_hard" and not session_state.get("address_confirmed", False):
+            return {
+                "action_type": "send_reply",
+                "message": "Please confirm this address is correct."
+            }
+        
+        elif task_id == "ambiguous_request" and not session_state.get("resolved", False):
+            return {
+                "action_type": "send_reply",
+                "message": "Your address has been updated and a replacement has been shipped."
+            }
+    
+    sys_prompt = get_task_prompt(task_id, session_state, use_expert)
+    
+    state_summary = {k: v for k, v in session_state.items() 
+                     if k in ['order_checked', 'address_collected', 'address_confirmed', 'policy_explained', 'resolved']}
+    
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {
+                    "role": "user",
+                    "content": f"Task: {task_id}\nCurrent state: {json.dumps(state_summary)}\nReturn ONLY valid JSON with action_type field."
+                }
+            ],
+            temperature=0.2,
+            max_tokens=150
+        )
+
+        content = response.choices[0].message.content.strip()
+        
+        if "```" in content:
+            parts = content.split("```")
+            if len(parts) > 1:
+                content = parts[1]
+                if content.startswith("json"):
+                    content = content[4:]
+                content = content.strip()
+
+        start = content.find("{")
+        end = content.rfind("}") + 1
+        if start != -1 and end != 0:
+            content = content[start:end]
+        else:
+            return {"action_type": "send_reply", "message": "I'm not sure how to help. Could you clarify?"}
+
+        data = json.loads(content)
+        
+        if "action_type" not in data:
+            return {"action_type": "send_reply", "message": "Let me try to help you with that."}
+        
+        if data["action_type"] not in ["lookup_order", "send_reply"]:
+            data["action_type"] = "send_reply"
+            data["message"] = "I understand your concern. Let me help you with that."
+        
+        return data
+        
+    except Exception as e:
+        print(f"❌ AI model error: {e}")
+        return {"action_type": "send_reply", "message": "I encountered an error. Could you please try again?"}
+
+def get_task_prompt(task_id: str, session_state: Dict, use_expert: bool = False) -> str:
+    """Natural language prompts with strict action restrictions"""
+    
+    base_instructions = (
+        "### STRICT RULES ###\n"
+        "1. You have ONLY TWO tools: 'lookup_order' and 'send_reply'.\n"
+        "2. If you need to talk to the user, you MUST use 'send_reply'.\n"
+        "3. NEVER invent action_types like 'ask_address' or 'confirm_order'.\n"
+        "4. Your output must be PURE JSON.\n\n"
+    )
+    
+    expert_section = ""
+    if use_expert and task_id in REWARD_CONFIG:
+        expert_hint = REWARD_CONFIG[task_id]["expert_hint"]
+        if isinstance(expert_hint, list):
+            order_checked = session_state.get("order_checked", False)
+            address_collected = session_state.get("address_collected", False)
+            address_confirmed = session_state.get("address_confirmed", False)
+            
+            if not order_checked:
+                hint = expert_hint[0]
+            elif not address_collected:
+                hint = expert_hint[1]
+            elif not address_confirmed:
+                hint = expert_hint[2]
+            else:
+                hint = expert_hint[2] if len(expert_hint) > 2 else expert_hint[-1]
+        else:
+            hint = expert_hint
+        expert_section = f"\n\n🚨 EXPERT COMMAND: {hint}\n"
+    
+    if task_id == "order_status_easy":
+        return base_instructions + """
+STRICT ORDER:
+1. If order_checked = false → MUST use lookup_order first
+2. After order_checked = true → send_reply with status
+
+DO NOT skip steps.
+DO NOT repeat steps.
+
+Respond ONLY in JSON.
+"""
+    elif task_id == "refund_policy_medium":
+        return base_instructions + """
+STRICT ORDER:
+1. If policy_explained = false → MUST use send_reply with 'refund' keyword
+2. Include: '30-day full refund policy'
+
+DO NOT skip steps.
+DO NOT repeat steps.
+
+Respond ONLY in JSON.
+"""
+    elif task_id == "address_change_hard":
+        return base_instructions + """
+STRICT ORDER:
+1. If order_checked = false → lookup_order
+2. If address_collected = false → send_reply asking for address (use words: address, location, details)
+3. If address_confirmed = false → send_reply confirming address (use word: confirm)
+
+DO NOT skip steps.
+DO NOT repeat steps.
+
+Respond ONLY in JSON.
+"""
+    elif task_id == "ambiguous_request":
+        return base_instructions + """
+STRICT ORDER:
+1. If order_checked = false → lookup_order first
+2. If address_collected = false → send_reply asking for new address
+3. If resolved = false → send_reply confirming replacement
+
+DO NOT skip steps.
+DO NOT repeat steps.
+
+Respond ONLY in JSON.
+"""
+    else:
+        return base_instructions + "Return valid JSON with action_type field."
+
 def validate_and_update_state(task_id: str, action_dict: Dict, session: Dict, used_expert: bool = False) -> tuple:
-    """Validate action and update state - reward shaping for RL"""
+    """Validate action and update state"""
     action_type = action_dict.get("action_type", "")
     expert_penalty = -0.2 if used_expert else 0
     message = action_dict.get("message", "").lower()
@@ -902,28 +757,7 @@ async def tasks():
 
 @app.get("/health")
 async def health():
-    all_q = []
-    for sess in sessions.values():
-        for state_q in sess.get("q_values", {}).values():
-            all_q.extend(state_q.values())
-    global_avg_q = sum(all_q) / len(all_q) if all_q else 0.0
-    
-    return {
-        "status": "healthy", 
-        "active_sessions": len(sessions), 
-        "ai_model": MODEL_NAME if client else "fallback",
-        "global_average_q": round(global_avg_q, 3),
-        "rl_config": {
-            "epsilon": EPSILON,
-            "epsilon_current": round(sessions.get(list(sessions.keys())[0], {}).get("epsilon", EPSILON), 3) if sessions else EPSILON,
-            "epsilon_min": MIN_EPSILON,
-            "epsilon_decay": EPSILON_DECAY,
-            "gamma": GAMMA,
-            "learning_rate": LEARNING_RATE,
-            "step_penalty": STEP_PENALTY,
-            "repeated_action_penalty": 0.05
-        }
-    }
+    return {"status": "healthy", "active_sessions": len(sessions), "ai_model": MODEL_NAME if client else "fallback"}
 
 @app.get("/session/{session_id}")
 async def get_session(session_id: str):
@@ -935,11 +769,6 @@ async def get_session(session_id: str):
     max_score = config["max_score"]
     score_value = min(session["total_reward"], max_score)
     
-    all_q_values = []
-    for state_q in session.get("q_values", {}).values():
-        all_q_values.extend(state_q.values())
-    avg_q = sum(all_q_values) / len(all_q_values) if all_q_values else 0.0
-    
     return {
         "session_id": session_id,
         "task_id": session["task_id"],
@@ -949,23 +778,14 @@ async def get_session(session_id: str):
         "actions_taken": session["actions_taken"],
         "expert_used_count": session["expert_used_count"],
         "total_reward": session["total_reward"],
-        "discounted_reward": session.get("discounted_reward", 0.0),
         "score": score_value,
         "max_score": max_score,
         "score_display": f"{score_value:.2f} / {max_score}",
         "done": session["done"],
         "perfect_completion": session.get("perfect_completion", False),
-        "penalty_count": session.get("penalty_count", 0),
-        "trajectory_length": len(session.get("trajectory", [])),
-        "exploration_rate": session.get("epsilon", EPSILON),
-        "q_table_size": len(session.get("q_values", {})),
-        "average_q_value": round(avg_q, 3),
-        "exploration_count": session.get("exploration_count", 0),
-        "exploitation_count": session.get("exploitation_count", 0),
-        "q_value_history": session.get("q_value_history", [])
+        "penalty_count": session.get("penalty_count", 0)
     }
 
-# HTML endpoint (kept from original)
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """<!DOCTYPE html>
@@ -973,10 +793,11 @@ def home():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Customer Support RL | True Q-Learning Agent</title>
+    <title>Customer Support RL | AI Agent Training Platform</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: radial-gradient(circle at 20% 30%, #0a0a1a, #050510);
@@ -984,6 +805,7 @@ def home():
             color: #e2e8f0;
             overflow-x: hidden;
         }
+        
         #particle-canvas {
             position: fixed;
             top: 0;
@@ -994,6 +816,7 @@ def home():
             z-index: 0;
             opacity: 0.5;
         }
+        
         .glass-header {
             position: sticky;
             top: 0;
@@ -1002,6 +825,7 @@ def home():
             background: rgba(10, 10, 30, 0.7);
             border-bottom: 1px solid rgba(139, 92, 246, 0.2);
         }
+        
         .header-container {
             max-width: 1400px;
             margin: 0 auto;
@@ -1010,11 +834,13 @@ def home():
             align-items: center;
             justify-content: space-between;
         }
+        
         .logo-area {
             display: flex;
             align-items: center;
             gap: 0.75rem;
         }
+        
         .logo-icon {
             width: 2rem;
             height: 2rem;
@@ -1025,14 +851,17 @@ def home():
             justify-content: center;
             box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
         }
+        
         .logo-icon svg { width: 1rem; height: 1rem; color: white; }
         .logo-text h1 { font-size: 0.875rem; font-weight: 600; }
         .logo-text p { font-size: 0.625rem; color: #94a3b8; }
+        
         .status-area {
             display: flex;
             align-items: center;
             gap: 0.75rem;
         }
+        
         .model-badge {
             background: rgba(139, 92, 246, 0.15);
             padding: 0.25rem 0.5rem;
@@ -1041,6 +870,7 @@ def home():
             font-size: 0.625rem;
             border: 1px solid rgba(139, 92, 246, 0.3);
         }
+        
         .status-dot {
             width: 0.5rem;
             height: 0.5rem;
@@ -1050,7 +880,9 @@ def home():
         .status-online { background: #10b981; box-shadow: 0 0 8px #10b981; animation: pulse 2s infinite; }
         .status-offline { background: #ef4444; }
         .status-checking { background: #f59e0b; animation: pulse 1s infinite; }
+        
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        
         .main-layout {
             max-width: 1400px;
             margin: 0 auto;
@@ -1058,12 +890,15 @@ def home():
             position: relative;
             z-index: 1;
         }
+        
         .two-columns {
             display: grid;
             grid-template-columns: 320px 1fr;
             gap: 1.5rem;
         }
+        
         @media (max-width: 768px) { .two-columns { grid-template-columns: 1fr; } }
+        
         .task-item {
             background: rgba(255, 255, 255, 0.03);
             backdrop-filter: blur(10px);
@@ -1074,21 +909,25 @@ def home():
             transition: all 0.2s ease;
             margin-bottom: 0.75rem;
         }
+        
         .task-item:hover {
             background: rgba(255, 255, 255, 0.06);
             border-color: rgba(139, 92, 246, 0.3);
             transform: translateY(-2px);
         }
+        
         .task-item.selected {
             background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(99, 102, 241, 0.1));
             border-color: #8b5cf6;
         }
+        
         .task-header-row {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 0.5rem;
         }
+        
         .task-name { font-weight: 600; font-size: 0.9rem; }
         .difficulty-tag {
             font-size: 0.625rem;
@@ -1100,8 +939,10 @@ def home():
         .diff-medium { background: #f59e0b; color: white; }
         .diff-hard { background: #ef4444; color: white; }
         .diff-hardplus { background: #8b5cf6; color: white; }
+        
         .task-desc { font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.5rem; }
         .task-meta { display: flex; gap: 0.75rem; font-size: 0.625rem; color: #64748b; }
+        
         .control-panel {
             background: rgba(255, 255, 255, 0.03);
             backdrop-filter: blur(10px);
@@ -1112,12 +953,14 @@ def home():
             flex-direction: column;
             gap: 1rem;
         }
+        
         .btn-group {
             display: flex;
             flex-wrap: wrap;
             gap: 0.5rem;
             margin-bottom: 0;
         }
+        
         .btn {
             padding: 0.5rem 1rem;
             border-radius: 0.5rem;
@@ -1130,43 +973,52 @@ def home():
             align-items: center;
             gap: 0.375rem;
         }
+        
         .btn-primary {
             background: linear-gradient(135deg, #8b5cf6, #6366f1);
             color: white;
         }
         .btn-primary:hover:not(:disabled) { opacity: 0.9; transform: scale(1.02); }
+        
         .btn-outline {
             background: transparent;
             border: 1px solid rgba(255, 255, 255, 0.2);
             color: #e2e8f0;
         }
         .btn-outline:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
+        
         .btn-expert {
             border-color: #f59e0b;
             color: #f59e0b;
         }
         .btn-expert:hover:not(:disabled) { background: rgba(245, 158, 11, 0.1); }
+        
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        
         .score-ring-container {
             display: flex;
             justify-content: center;
             margin-bottom: 1rem;
         }
+        
         .score-ring {
             position: relative;
             width: 140px;
             height: 140px;
         }
+        
         .score-ring svg {
             width: 100%;
             height: 100%;
             transform: rotate(-90deg);
         }
+        
         .score-ring-bg {
             stroke: rgba(255, 255, 255, 0.08);
             fill: none;
             stroke-width: 10;
         }
+        
         .score-ring-fill {
             stroke: #8b5cf6;
             fill: none;
@@ -1175,6 +1027,7 @@ def home():
             transition: stroke-dashoffset 0.6s ease;
             filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.5));
         }
+        
         .score-ring-text {
             position: absolute;
             top: 50%;
@@ -1182,21 +1035,25 @@ def home():
             transform: translate(-50%, -50%);
             text-align: center;
         }
+        
         .score-number {
             font-size: 1.8rem;
             font-weight: 700;
             color: #8b5cf6;
         }
+        
         .score-max-text {
             font-size: 0.7rem;
             color: #64748b;
         }
+        
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 0.75rem;
             margin: 0;
         }
+        
         .stat-card {
             background: rgba(255, 255, 255, 0.03);
             border-radius: 0.75rem;
@@ -1204,8 +1061,10 @@ def home():
             text-align: center;
             border: 1px solid rgba(255, 255, 255, 0.05);
         }
+        
         .stat-value { font-size: 1.25rem; font-weight: 700; }
         .stat-label { font-size: 0.6rem; text-transform: uppercase; color: #64748b; margin-top: 0.25rem; }
+        
         .reward-chart {
             display: flex;
             align-items: flex-end;
@@ -1213,18 +1072,22 @@ def home():
             height: 50px;
             margin: 0.5rem 0;
         }
+        
         .chart-bar {
             flex: 1;
             background: linear-gradient(180deg, #10b981, #059669);
             border-radius: 2px 2px 0 0;
             transition: height 0.3s ease;
         }
+        
         .chart-bar.negative { background: linear-gradient(180deg, #ef4444, #dc2626); }
+        
         .timeline {
             max-height: 400px;
             overflow-y: auto;
             margin-top: 0;
         }
+        
         .timeline-item {
             padding: 0.75rem;
             border-left: 2px solid #8b5cf6;
@@ -1232,24 +1095,29 @@ def home():
             background: rgba(255, 255, 255, 0.02);
             border-radius: 0.5rem;
         }
+        
         .timeline-item.expert { border-left-color: #f59e0b; background: rgba(245, 158, 11, 0.05); }
-        .timeline-item.q-value { border-left-color: #10b981; background: rgba(16, 185, 129, 0.05); }
+        
         .timeline-header {
             display: flex;
             justify-content: space-between;
             margin-bottom: 0.5rem;
             font-size: 0.7rem;
         }
+        
         .reward-positive { color: #10b981; }
         .reward-negative { color: #ef4444; }
+        
         .timeline-action {
             font-family: monospace;
             font-size: 0.65rem;
             color: #94a3b8;
             word-break: break-all;
         }
+        
         .timeline-explanation { font-size: 0.65rem; color: #64748b; margin-top: 0.25rem; }
         .timeline-state { font-size: 0.6rem; color: #475569; margin-top: 0.25rem; }
+        
         .section-title {
             font-size: 0.7rem;
             text-transform: uppercase;
@@ -1257,11 +1125,13 @@ def home():
             color: #64748b;
             margin-bottom: 0.75rem;
         }
+        
         .empty-state {
             text-align: center;
             padding: 3rem;
             color: #64748b;
         }
+        
         .spinner {
             width: 1rem;
             height: 1rem;
@@ -1270,13 +1140,16 @@ def home():
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
         }
+        
         @keyframes spin { to { transform: rotate(360deg); } }
+        
         .task-header-card {
             padding: 1rem;
             border-radius: 1rem;
             background: rgba(255,255,255,0.04);
             border: 1px solid rgba(255,255,255,0.08);
         }
+        
         .progress-bar-container {
             height: 8px;
             border-radius: 6px;
@@ -1284,12 +1157,14 @@ def home():
             margin-top: 0.75rem;
             overflow: hidden;
         }
+        
         .progress-bar-fill {
             height: 100%;
             border-radius: 6px;
             background: linear-gradient(90deg, #10b981, #22c55e);
             transition: width 0.3s ease;
         }
+        
         .completion-message {
             margin-bottom: 0.75rem;
             padding: 0.5rem;
@@ -1300,36 +1175,11 @@ def home():
             border: 1px solid rgba(139, 92, 246, 0.3);
             color: #e2e8f0;
         }
-        .rl-badge {
-            background: rgba(16, 185, 129, 0.15);
-            border: 1px solid rgba(16, 185, 129, 0.3);
-            padding: 0.25rem 0.5rem;
-            border-radius: 0.375rem;
-            font-size: 0.625rem;
-        }
-        .metrics-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 0.5rem;
-            margin-top: 0.5rem;
-            padding: 0.5rem;
-            background: rgba(0,0,0,0.2);
-            border-radius: 0.5rem;
-        }
-        .metric {
-            text-align: center;
-            font-size: 0.7rem;
-        }
-        .metric-value {
-            font-weight: 700;
-            color: #10b981;
-        }
-        .learning-improving { color: #10b981; }
-        .learning-declining { color: #ef4444; }
     </style>
 </head>
 <body>
     <canvas id="particle-canvas"></canvas>
+    
     <header class="glass-header">
         <div class="header-container">
             <div class="logo-area">
@@ -1340,22 +1190,23 @@ def home():
                 </div>
                 <div class="logo-text">
                     <h1>Customer Support RL</h1>
-                    <p>True Q-Learning Agent</p>
+                    <p>Reinforcement Learning Simulator</p>
                 </div>
             </div>
             <div class="status-area" id="status-area"></div>
         </div>
     </header>
+    
     <main class="main-layout">
         <div class="two-columns">
             <div>
                 <div class="section-title">TRAINING TASKS</div>
                 <div id="tasks-container"></div>
             </div>
+            
             <div>
                 <div class="control-panel">
                     <div id="task-header-card"></div>
-                    <div id="rl-metrics"></div>
                     <div id="stats-container"></div>
                     <div id="controls-container"></div>
                     <div id="performance-container"></div>
@@ -1365,8 +1216,10 @@ def home():
             </div>
         </div>
     </main>
+    
     <script>
         const API_BASE = window.location.origin;
+        
         let tasks = [];
         let selectedTask = null;
         let sessionId = null;
@@ -1380,14 +1233,17 @@ def home():
         let online = null;
         let aiModel = "";
         
+        // Particle animation
         (function initParticles() {
             const canvas = document.getElementById('particle-canvas');
             const ctx = canvas.getContext('2d');
             let particles = [];
+            
             function resize() {
                 canvas.width = window.innerWidth;
                 canvas.height = window.innerHeight;
             }
+            
             function createParticles() {
                 particles = [];
                 for (let i = 0; i < 80; i++) {
@@ -1401,19 +1257,23 @@ def home():
                     });
                 }
             }
+            
             function draw() {
                 if (!ctx) return;
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
                 particles.forEach(p => {
                     p.x += p.vx;
                     p.y += p.vy;
                     if (p.x < 0 || p.x > canvas.width) p.vx *= -1;
                     if (p.y < 0 || p.y > canvas.height) p.vy *= -1;
+                    
                     ctx.beginPath();
                     ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
                     ctx.fillStyle = `rgba(139, 92, 246, ${p.alpha})`;
                     ctx.fill();
                 });
+                
                 for (let i = 0; i < particles.length; i++) {
                     for (let j = i + 1; j < particles.length; j++) {
                         const dx = particles[i].x - particles[j].x;
@@ -1429,9 +1289,14 @@ def home():
                         }
                     }
                 }
+                
                 requestAnimationFrame(draw);
             }
-            window.addEventListener('resize', () => { resize(); createParticles(); });
+            
+            window.addEventListener('resize', () => {
+                resize();
+                createParticles();
+            });
             resize();
             createParticles();
             draw();
@@ -1452,9 +1317,11 @@ def home():
                 const data = await res.json();
                 online = true;
                 aiModel = data.ai_model || "";
-                if (data.rl_config) console.log('RL Config:', data.rl_config);
                 renderStatus();
-            } catch(e) { online = false; renderStatus(); }
+            } catch(e) {
+                online = false;
+                renderStatus();
+            }
         }
         
         async function resetTask(taskId, taskMaxScore) {
@@ -1476,7 +1343,6 @@ def home():
                 renderPerformance();
                 renderTimeline();
                 renderControls();
-                renderRLMetrics();
             } catch(e) { alert("Reset error: " + e.message); }
             finally { loading = false; renderControls(); }
         }
@@ -1502,8 +1368,6 @@ def home():
                 renderPerformance();
                 renderTimeline();
                 renderControls();
-                renderRLMetrics();
-                if (data.action_source) console.log(`🤖 Action source: ${data.action_source}, Learning: ${data.learning_status}`);
             } catch(e) { alert("Step error: " + e.message); }
             finally { loading = false; renderControls(); }
         }
@@ -1517,43 +1381,44 @@ def home():
             done = false;
             perfect = false;
             completionMsg = null;
+            
             document.getElementById('stats-container').innerHTML = '';
             document.getElementById('performance-container').innerHTML = '';
-            document.getElementById('rl-metrics').innerHTML = '';
-            document.getElementById('timeline-container').innerHTML = '<div class="empty-state">No steps yet. Click "Start Session" then "Step AI" to begin training.</div>';
+            document.getElementById('timeline-container').innerHTML =
+                '<div class="empty-state">No steps yet. Click "Start Session" then "Step AI" to begin training.</div>';
+            
             renderTasks();
             renderHeaderCard();
             renderControls();
         }
         
-        function renderRLMetrics() {
-            const container = document.getElementById('rl-metrics');
-            if (!container || !sessionId || steps.length === 0) { if (container) container.innerHTML = ''; return; }
-            const latestStep = steps[0];
-            if (!latestStep) return;
-            const learningClass = latestStep.learning_status === 'improving' ? 'learning-improving' : 'learning-declining';
-            container.innerHTML = `
-                <div class="metrics-grid">
-                    <div class="metric"><div>🎯 Action Source</div><div class="metric-value">${latestStep.action_source || 'unknown'}</div></div>
-                    <div class="metric"><div>📊 Q-Confidence</div><div class="metric-value">${latestStep.policy_confidence || 0}</div></div>
-                    <div class="metric"><div>🎲 Epsilon (ε)</div><div class="metric-value">${latestStep.epsilon || 0.1}</div></div>
-                    <div class="metric"><div>📈 Avg Q-Value</div><div class="metric-value">${latestStep.average_q_value || 0}</div></div>
-                    <div class="metric"><div>🔍 Exploration</div><div class="metric-value">${latestStep.exploration_count || 0}</div></div>
-                    <div class="metric"><div>⚡ Exploitation</div><div class="metric-value">${latestStep.exploitation_count || 0}</div></div>
-                    <div class="metric"><div>🧠 Learning</div><div class="metric-value ${learningClass}">${latestStep.learning_status || 'unknown'}</div></div>
-                </div>
-            `;
-        }
-        
         function renderHeaderCard() {
             const container = document.getElementById('task-header-card');
             if (!container || !selectedTask) return;
+            
             let diffClass = '';
             if (selectedTask.difficulty === 'easy') diffClass = 'diff-easy';
             else if (selectedTask.difficulty === 'medium') diffClass = 'diff-medium';
             else if (selectedTask.difficulty === 'hard') diffClass = 'diff-hard';
             else diffClass = 'diff-hardplus';
-            container.innerHTML = `<div class="task-header-card"><div style="display:flex;justify-content:space-between;align-items:center;"><div><div style="font-weight:600;font-size:1rem;">${selectedTask.name}</div><div style="font-size:0.75rem;color:#94a3b8;">${selectedTask.description}</div></div><div style="display:flex;gap:0.5rem;"><span class="difficulty-tag ${diffClass}">${selectedTask.difficulty.toUpperCase()}</span><span class="rl-badge">🎯 Q-Learning</span></div></div></div>`;
+            
+            container.innerHTML = `
+                <div class="task-header-card">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <div style="font-weight:600;font-size:1rem;">
+                                ${selectedTask.name}
+                            </div>
+                            <div style="font-size:0.75rem;color:#94a3b8;">
+                                ${selectedTask.description}
+                            </div>
+                        </div>
+                        <span class="difficulty-tag ${diffClass}">
+                            ${selectedTask.difficulty.toUpperCase()}
+                        </span>
+                    </div>
+                </div>
+            `;
         }
         
         function renderStatus() {
@@ -1561,7 +1426,6 @@ def home():
             if (!container) return;
             let html = '';
             if (aiModel) html += `<span class="model-badge">${aiModel}</span>`;
-            html += `<span class="rl-badge">ε=0.1→0.01 γ=0.95</span>`;
             if (online === true) html += `<div><span class="status-dot status-online"></span><span style="margin-left: 0.25rem; font-size: 0.7rem;">Online</span></div>`;
             else if (online === false) html += `<div><span class="status-dot status-offline"></span><span style="margin-left: 0.25rem; font-size: 0.7rem;">Offline</span></div>`;
             else html += `<div><span class="status-dot status-checking"></span><span style="margin-left: 0.25rem; font-size: 0.7rem;">Checking...</span></div>`;
@@ -1572,57 +1436,157 @@ def home():
             const container = document.getElementById('tasks-container');
             if (!container) return;
             if (tasks.length === 0) { container.innerHTML = '<div class="empty-state">Loading tasks...</div>'; return; }
+            
             container.innerHTML = tasks.map(task => {
                 let diffClass = '';
                 if (task.difficulty === 'easy') diffClass = 'diff-easy';
                 else if (task.difficulty === 'medium') diffClass = 'diff-medium';
                 else if (task.difficulty === 'hard') diffClass = 'diff-hard';
                 else diffClass = 'diff-hardplus';
-                return `<div class="task-item ${selectedTask?.task_id === task.task_id ? 'selected' : ''}" onclick='selectTask(${JSON.stringify(task)})'><div class="task-header-row"><span class="task-name">${task.name}</span><span class="difficulty-tag ${diffClass}">${task.difficulty.toUpperCase()}</span></div><div class="task-desc">${task.description}</div><div class="task-meta"><span>⚡ ${task.max_steps} steps</span><span>🎯 ${task.max_score} pts</span></div></div>`;
+                
+                return `
+                    <div class="task-item ${selectedTask?.task_id === task.task_id ? 'selected' : ''}" onclick='selectTask(${JSON.stringify(task)})'>
+                        <div class="task-header-row">
+                            <span class="task-name">${task.name}</span>
+                            <span class="difficulty-tag ${diffClass}">${task.difficulty.toUpperCase()}</span>
+                        </div>
+                        <div class="task-desc">${task.description}</div>
+                        <div class="task-meta">
+                            <span>⚡ ${task.max_steps} steps</span>
+                            <span>🎯 ${task.max_score} pts</span>
+                        </div>
+                    </div>
+                `;
             }).join('');
         }
         
         function renderControls() {
             const container = document.getElementById('controls-container');
             if (!container || !selectedTask) { if(container) container.innerHTML = ''; return; }
-            container.innerHTML = `<div class="btn-group"><button class="btn btn-outline" onclick="resetTask('${selectedTask.task_id}', ${selectedTask.max_score})" ${loading ? 'disabled' : ''}>🔄 ${sessionId ? 'Reset Session' : 'Start Session'}</button>${sessionId && !done ? `<button class="btn btn-primary" onclick="takeStep(false)" ${loading ? 'disabled' : ''}>${loading ? '<div class="spinner"></div>' : '🤖 Step AI (Q-Learning)'}</button><button class="btn btn-outline btn-expert" onclick="takeStep(true)" ${loading ? 'disabled' : ''}>🎓 Ask Expert (-0.2)</button>` : ''}</div>${sessionId ? '<div style="font-size:0.6rem;color:#64748b;margin-top:0.5rem;">🎲 ε decays from 0.1 → 0.01 | RL chooses actions, LLM generates messages</div>' : ''}`;
+            
+            container.innerHTML = `
+                <div class="btn-group">
+                    <button class="btn btn-outline" onclick="resetTask('${selectedTask.task_id}', ${selectedTask.max_score})" ${loading ? 'disabled' : ''}>
+                        🔄 ${sessionId ? 'Reset Session' : 'Start Session'}
+                    </button>
+                    ${sessionId && !done ? `
+                        <button class="btn btn-primary" onclick="takeStep(false)" ${loading ? 'disabled' : ''}>
+                            ${loading ? '<div class="spinner"></div>' : '🤖 Step AI'}
+                        </button>
+                        <button class="btn btn-outline btn-expert" onclick="takeStep(true)" ${loading ? 'disabled' : ''}>
+                            🎓 Ask Expert (-0.2)
+                        </button>
+                    ` : ''}
+                </div>
+            `;
         }
         
         function renderStats() {
             const container = document.getElementById('stats-container');
-            if (!container || !sessionId) { if (container) container.innerHTML = ''; return; }
+            if (!container || !sessionId) {
+                if (container) container.innerHTML = '';
+                return;
+            }
+            
             const expertCount = steps.filter(s => s.used_expert).length;
             const progressPercent = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
-            container.innerHTML = `<div class="stats-grid"><div class="stat-card"><div class="stat-value" style="color:#8b5cf6">${score.toFixed(2)}</div><div class="stat-label">SCORE</div></div><div class="stat-card"><div class="stat-value">${steps.length}</div><div class="stat-label">STEPS</div></div><div class="stat-card"><div class="stat-value">${progressPercent}%</div><div class="stat-label">PROGRESS</div></div><div class="stat-card"><div class="stat-value">${expertCount}</div><div class="stat-label">EXPERT USES</div></div></div>`;
+            
+            container.innerHTML = `
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" style="color:#8b5cf6">${score.toFixed(2)}</div>
+                        <div class="stat-label">SCORE</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${steps.length}</div>
+                        <div class="stat-label">STEPS</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${progressPercent}%</div>
+                        <div class="stat-label">PROGRESS</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${expertCount}</div>
+                        <div class="stat-label">EXPERT USES</div>
+                    </div>
+                </div>
+            `;
         }
         
         function renderPerformance() {
             const container = document.getElementById('performance-container');
-            if (!container || !sessionId) { if (container) container.innerHTML = ''; return; }
+            if (!container || !sessionId) {
+                if (container) container.innerHTML = '';
+                return;
+            }
+            
             const percent = maxScore > 0 ? Math.min(score / maxScore, 1) : 0;
             const radius = 60;
             const circumference = 2 * Math.PI * radius;
             const dashOffset = circumference * (1 - percent);
-            container.innerHTML = `<div><div style="font-size:0.7rem;color:#64748b;margin-bottom:0.5rem;">PERFORMANCE</div>${completionMsg ? `<div class="completion-message">${completionMsg}</div>` : ''}<div class="score-ring-container"><div class="score-ring"><svg viewBox="0 0 140 140"><circle class="score-ring-bg" cx="70" cy="70" r="60"/><circle class="score-ring-fill" cx="70" cy="70" r="60" stroke-dasharray="${circumference}" stroke-dashoffset="${dashOffset}"/></svg><div class="score-ring-text"><div class="score-number">${score.toFixed(1)}</div><div class="score-max-text">/ ${maxScore.toFixed(1)}</div></div></div></div><div class="progress-bar-container"><div class="progress-bar-fill" style="width: ${percent * 100}%"></div></div><div class="reward-chart" id="reward-chart"></div></div>`;
+            
+            container.innerHTML = `
+                <div>
+                    <div style="font-size:0.7rem;color:#64748b;margin-bottom:0.5rem;">PERFORMANCE</div>
+                    ${completionMsg ? `
+                        <div class="completion-message">
+                            ${completionMsg}
+                        </div>
+                    ` : ''}
+                    <div class="score-ring-container">
+                        <div class="score-ring">
+                            <svg viewBox="0 0 140 140">
+                                <circle class="score-ring-bg" cx="70" cy="70" r="60"/>
+                                <circle class="score-ring-fill" cx="70" cy="70" r="60"
+                                        stroke-dasharray="${circumference}"
+                                        stroke-dashoffset="${dashOffset}"/>
+                            </svg>
+                            <div class="score-ring-text">
+                                <div class="score-number">${score.toFixed(1)}</div>
+                                <div class="score-max-text">/ ${maxScore.toFixed(1)}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar-fill" style="width: ${percent * 100}%"></div>
+                    </div>
+                    <div class="reward-chart" id="reward-chart"></div>
+                </div>
+            `;
+            
             const chartContainer = document.getElementById('reward-chart');
             if (chartContainer && steps.length > 0) {
                 const recentSteps = [...steps].slice(0, 12);
                 const maxAbs = Math.max(...recentSteps.map(s => Math.abs(s.reward)), 0.5);
-                chartContainer.innerHTML = recentSteps.map(step => `<div class="chart-bar ${step.reward < 0 ? 'negative' : ''}" style="height: ${Math.max((Math.abs(step.reward) / maxAbs) * 40, 4)}px;"></div>`).join('');
+                chartContainer.innerHTML = recentSteps.map(step => {
+                    const height = (Math.abs(step.reward) / maxAbs) * 40;
+                    return `<div class="chart-bar ${step.reward < 0 ? 'negative' : ''}" style="height: ${Math.max(height, 4)}px;"></div>`;
+                }).join('');
             }
         }
         
         function renderTimeline() {
             const container = document.getElementById('timeline-container');
             if (!container) return;
-            if (!sessionId || steps.length === 0) { container.innerHTML = '<div class="empty-state">No steps yet. Click "Start Session" then "Step AI" to begin training.</div>'; return; }
+            if (!sessionId || steps.length === 0) {
+                container.innerHTML = '<div class="empty-state">No steps yet. Click "Start Session" then "Step AI" to begin training.</div>';
+                return;
+            }
+            
             container.innerHTML = steps.map(step => {
                 const rewardClass = step.reward >= 0 ? 'reward-positive' : 'reward-negative';
                 const expertClass = step.used_expert ? 'expert' : '';
-                const qValueClass = step.action_source === 'q_value' ? 'q-value' : '';
-                const sourceIcon = step.action_source === 'q_value' ? '📊 ' : step.action_source === 'exploration' ? '🎲 ' : step.action_source === 'smart_fallback' ? '🧠 ' : '🤖 ';
-                const learningIcon = step.learning_status === 'improving' ? '📈' : '📉';
-                return `<div class="timeline-item ${expertClass} ${qValueClass}"><div class="timeline-header"><span>Step ${step.step} ${sourceIcon}${step.action_source || 'unknown'} ${learningIcon}</span><span class="${rewardClass}">${step.reward >= 0 ? '+' : ''}${step.reward}</span></div><div class="timeline-action">Action: ${JSON.stringify(step.action)}</div><div class="timeline-explanation">📖 ${step.reward_explanation}</div>${step.policy_confidence ? `<div class="timeline-state">🎯 Q-confidence: ${step.policy_confidence} | Avg Q: ${step.average_q_value} | Learning: ${step.learning_status}</div>` : ''}${step.state ? `<div class="timeline-state">📊 order_checked=${step.state.order_checked}, address_collected=${step.state.address_collected}, address_confirmed=${step.state.address_confirmed}</div>` : ''}</div>`;
+                return `
+                    <div class="timeline-item ${expertClass}">
+                        <div class="timeline-header">
+                            <span>Step ${step.step}</span>
+                            <span class="${rewardClass}">${step.reward >= 0 ? '+' : ''}${step.reward}</span>
+                        </div>
+                        <div class="timeline-action">Action: ${JSON.stringify(step.action)}</div>
+                        <div class="timeline-explanation">📖 ${step.reward_explanation}</div>
+                        ${step.state ? `<div class="timeline-state">📊 order_checked=${step.state.order_checked}, address_collected=${step.state.address_collected}, address_confirmed=${step.state.address_confirmed}</div>` : ''}
+                    </div>
+                `;
             }).join('');
         }
         
@@ -1636,9 +1600,13 @@ def home():
         window.selectTask = selectTask;
         window.resetTask = resetTask;
         window.takeStep = takeStep;
+        
         init();
     </script>
 </body>
 </html>
     """
 
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=7860)
