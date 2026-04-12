@@ -1,11 +1,11 @@
-# Customer Support Simulator - OpenEnv Environment with True Q-Learning
+# Customer Support Simulator - OpenEnv Environment
 
 [![Hugging Face Space](https://img.shields.io/badge/🤗%20Hugging%20Face-Space-blue)](https://huggingface.co/spaces/uma0729/customer-support-simulator)
 [![OpenEnv Compatible](https://img.shields.io/badge/OpenEnv-Compatible-green)](https://github.com/openenv/openenv)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-A production-ready reinforcement learning environment for training AI agents in customer support scenarios. Built for the OpenEnv ecosystem, this simulator features a **true Q-Learning agent** that learns optimal policies through experience, combining RL-based action selection with LLM-powered message generation.
+A production-ready reinforcement learning environment for training AI agents in customer support scenarios. Built for the OpenEnv ecosystem, this simulator provides a realistic, multi-task environment where agents must learn to handle customer inquiries ranging from simple order lookups to complex multi-step problem resolution.
 
 ## 🎯 Why Customer Support?
 
@@ -13,32 +13,12 @@ Customer support automation is a **$50B+ industry** where AI agents are increasi
 - **Safe sandboxes** that don't impact real customers
 - **Granular feedback** beyond binary success/failure  
 - **Progressive difficulty** from simple queries to ambiguous requests
-- **True reinforcement learning** capabilities for policy optimization
 
-This environment fills that gap by providing:
-- **Q-Learning with ε-greedy exploration** (ε decays 0.3 → 0.01)
-- **State-aware action selection** (RL chooses action type, LLM generates content)
-- **Bellman equation updates** with γ=0.95 discount factor
-- **Experience replay** for sample-efficient learning
-- **Real-time Q-value tracking** and policy confidence metrics
-
-## 🧠 RL Architecture
-
-### Decision Making Pipeline
-1. **State Abstraction**: Simplified state vector (stage + last action) to prevent state explosion
-2. **Action Selection**: ε-greedy policy over valid actions only
-3. **Message Generation**: LLM generates natural language for `send_reply` actions
-4. **Q-Update**: Bellman equation: `Q(s,a) ← Q(s,a) + α[r + γ·max Q(s') - Q(s,a)]`
-5. **Experience Replay**: Periodic replay of random trajectories for stable learning
-
-### Hyperparameters
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `EPSILON` | 0.3 → 0.01 | Exploration rate (decays 0.995 per step) |
-| `GAMMA` | 0.95 | Discount factor for future rewards |
-| `LEARNING_RATE` | 0.1 | Q-learning update rate |
-| `REPLAY_LEARNING_RATE` | 0.05 | Experience replay update rate |
-| `STEP_PENALTY` | -0.05 | Small penalty to encourage efficiency |
+This environment fills that gap by providing a **realistic, multi-task simulation** where agents learn:
+- Proper tool usage (`lookup_order` vs `send_reply`)
+- Multi-step reasoning and state tracking
+- Handling ambiguous customer requests
+- Balancing efficiency with accuracy
 
 ## 📋 Environment Overview
 
@@ -54,12 +34,14 @@ Agents interact via a structured action model with exactly **two primitive actio
 
 **Example Actions:**
 ```json
-// Look up an order (RL selects this action)
+// Look up an order
 {"action_type": "lookup_order", "order_id": "12345"}
 
-// Send a reply (RL selects action, LLM generates message)
+// Send a reply
 {"action_type": "send_reply", "message": "Your order has shipped!"}
-```
+
+// Ask for address (still uses send_reply!)
+{"action_type": "send_reply", "message": "Please provide your new shipping address."}
 ⚠️ Important: Agents must NOT invent new action types (e.g., ask_address, confirm_order). All communication with the customer happens through send_reply.
 
 ## Observation Space
