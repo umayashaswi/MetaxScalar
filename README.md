@@ -2,7 +2,6 @@
 
 [![Hugging Face Space](https://img.shields.io/badge/🤗%20Hugging%20Face-Space-blue)](https://huggingface.co/spaces/uma0729/customer-support-simulator)
 [![OpenEnv Compatible](https://img.shields.io/badge/OpenEnv-Compatible-green)](https://github.com/openenv/openenv)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
 A production-ready reinforcement learning environment for training AI agents in customer support scenarios. Built for the OpenEnv ecosystem, this simulator provides a realistic, multi-task environment where agents must learn to handle customer inquiries ranging from simple order lookups to complex multi-step problem resolution.
